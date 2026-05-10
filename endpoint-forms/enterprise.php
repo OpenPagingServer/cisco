@@ -160,7 +160,7 @@ body{font-family:Tahoma,sans-serif;margin:0;padding:18px;color:#202124;backgroun
                 <?php foreach ($audioModes as $option): ?><option <?= selected($values['audio'], $option) ?>><?= ef_h($option) ?></option><?php endforeach; ?>
             </select>
             <div class="audio-key">
-                <div><strong>Multicast:</strong> Sends a single RTP stream for all phones receiving a page. Uses less server resources, less delay. Requires multicast-compatible network infrastructure. High amount of packet loss on weak WLAN. Does not usually transmit over NAT/WAN & VPN tunnels. Enable IGMP on your network switch(es) for the best results.</div>
+                <div><strong>Multicast:</strong> Sends a single RTP stream for all phones receiving a page. Uses less server resources, less delay. Requires multicast compatible network infrastructure. High amount of packet loss on weak WLAN. Does not usually transmit over NAT/WAN & VPN tunnels. Enable IGMP on your network switch(es) for the best results.</div>
                 <div><strong>Unicast:</strong> Sends RTP streams directly to the phone. Works better over WAN, VPN, and WLAN. Uses more server resources, may cause noticeable delay between speakers. Use Unicast only if Multicast cannot be used on your network.</div>
                 <div><strong>Disabled:</strong> Audio will not be sent to this telephone.</div>
             </div>
