@@ -326,13 +326,13 @@ def fit_text_advanced(draw, text, font_path, max_width, max_height, start_size):
         spacing = max(4, size // 6)
         lines = wrap_text(draw, text, font, max_width)
         tw, th, metrics = measure_text_block(draw, lines, font, spacing)
-        
+
         if tw <= max_width and th <= max_height:
             return font, lines, spacing, tw, th, size, metrics
-        
+
         if best_fit is None:
             best_fit = (font, lines, spacing, tw, th, size, metrics)
-            
+
         size -= 2
 
     font = ImageFont.truetype(font_path, size=8)
@@ -344,58 +344,62 @@ def fit_text_advanced(draw, text, font_path, max_width, max_height, start_size):
 def choose_best_layout(work_w, work_h, pad, gap, text, font_path, start_size, symbol_img, symbol_resolution, draw):
     def calc_layout(direction):
         sym_img_copy = symbol_img.copy() if symbol_img else None
-        
+
         if direction == "H":
             sym_max_w = (work_w - 2*pad - gap) // 2
             sym_max_h = work_h - 2*pad
         else:
             sym_max_w = work_w - 2*pad
             sym_max_h = (work_h - 2*pad - gap) // 2
-            
+
         if sym_img_copy:
             if symbol_resolution:
                 rw, rh = parse_resolution(symbol_resolution)
                 sym_img_copy = sym_img_copy.resize((rw * 4, rh * 4), RESAMPLE)
             else:
                 sym_img_copy.thumbnail((max(1, sym_max_w), max(1, sym_max_h)), RESAMPLE)
-        
-        sw, sh = sym_img_copy.size if sym_img_copy else (0,0)
-        
+
+        sw, sh = sym_img_copy.size if sym_img_copy else (0, 0)
+
         if direction == "H":
             text_avail_w = max(1, work_w - 2*pad - sw - gap) if sym_img_copy else max(1, work_w - 2*pad)
             text_avail_h = max(1, work_h - 2*pad)
         else:
             text_avail_w = max(1, work_w - 2*pad)
             text_avail_h = max(1, work_h - 2*pad - sh - gap) if sym_img_copy else max(1, work_h - 2*pad)
-            
+
         font, lines, spacing, tw, th, size, metrics = fit_text_advanced(
             draw, text, font_path, text_avail_w, text_avail_h, start_size
         )
-        
+
         return {
             "dir": direction,
             "sym_img": sym_img_copy,
-            "sw": sw, "sh": sh,
-            "font": font, "lines": lines, "spacing": spacing,
-            "tw": tw, "th": th,
+            "sw": sw,
+            "sh": sh,
+            "font": font,
+            "lines": lines,
+            "spacing": spacing,
+            "tw": tw,
+            "th": th,
             "size": size,
-            "metrics": metrics
+            "metrics": metrics,
         }
 
     if not symbol_img or not text:
         return calc_layout("H")
-        
+
     layout_h = calc_layout("H")
     layout_v = calc_layout("V")
-    
+
     if layout_h["size"] > layout_v["size"]:
         return layout_h
-    elif layout_v["size"] > layout_h["size"]:
+    if layout_v["size"] > layout_h["size"]:
         return layout_v
-    else:
-        area_h = layout_h["sw"] * layout_h["sh"]
-        area_v = layout_v["sw"] * layout_v["sh"]
-        return layout_h if area_h >= area_v else layout_v
+
+    area_h = layout_h["sw"] * layout_h["sh"]
+    area_v = layout_v["sw"] * layout_v["sh"]
+    return layout_h if area_h >= area_v else layout_v
 
 def render_thumbnail(
     width: int,
@@ -428,7 +432,7 @@ def render_thumbnail(
     gap = max(12, int(min(work_w, work_h) * 0.05))
 
     layout = choose_best_layout(work_w, work_h, pad, gap, text, font_path, start_size, symbol_img, symbol_resolution, draw)
-    
+
     direction = layout["dir"]
     sym_img = layout["sym_img"]
     sw, sh = layout["sw"], layout["sh"]
@@ -437,10 +441,10 @@ def render_thumbnail(
     spacing = layout["spacing"]
     tw, th = layout["tw"], layout["th"]
     metrics = layout["metrics"]
-    
+
     if not sym_img and not text:
         return image.resize((width, height), RESAMPLE).convert("RGB")
-        
+
     if not sym_img:
         start_y = (work_h - th) // 2
         curr_y = start_y
@@ -449,26 +453,26 @@ def render_thumbnail(
             if line:
                 draw.text((start_x - left, curr_y - top), line, fill=fg_rgb, font=font)
             curr_y += h + spacing
-            
+
     elif not text:
         start_x = (work_w - sw) // 2
         start_y = (work_h - sh) // 2
         image.paste(sym_img, (start_x, start_y), sym_img)
-        
+
     else:
         if direction == "H":
             total_w = sw + gap + tw
             total_h = max(sh, th)
-            
+
             start_x = (work_w - total_w) // 2
             start_y = (work_h - total_h) // 2
-            
+
             sym_y = start_y + (total_h - sh) // 2
             image.paste(sym_img, (start_x, sym_y), sym_img)
-            
+
             text_x_base = start_x + sw + gap
             curr_y = start_y + (total_h - th) // 2
-            
+
             for line, (w, h, left, top) in zip(lines, metrics):
                 line_x = text_x_base + (tw - w) // 2
                 if line:
@@ -477,13 +481,13 @@ def render_thumbnail(
         else:
             total_w = max(sw, tw)
             total_h = sh + gap + th
-            
+
             start_x = (work_w - total_w) // 2
             start_y = (work_h - total_h) // 2
-            
+
             sym_x = start_x + (total_w - sw) // 2
             image.paste(sym_img, (sym_x, start_y), sym_img)
-            
+
             curr_y = start_y + sh + gap
             for line, (w, h, left, top) in zip(lines, metrics):
                 line_x = start_x + (total_w - w) // 2
@@ -492,6 +496,22 @@ def render_thumbnail(
                 curr_y += h + spacing
 
     return image.resize((width, height), RESAMPLE).convert("RGB")
+
+def render_monochrome(image: Image.Image) -> Image.Image:
+    return image.convert("L").point(lambda value: 0 if value < 160 else 255, mode="1")
+
+def render_indexed_16(image: Image.Image) -> Image.Image:
+    return image.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=16)
+
+def save_png_bytes(image: Image.Image, mono: bool) -> bytes:
+    buf = io.BytesIO()
+    if mono:
+        out = render_monochrome(image)
+        out.save(buf, format="PNG", optimize=True, bits=1)
+    else:
+        out = render_indexed_16(image)
+        out.save(buf, format="PNG", optimize=True, bits=4)
+    return buf.getvalue()
 
 def cache_key_for_request(
     width: int,
@@ -503,6 +523,7 @@ def cache_key_for_request(
     start_size: Optional[int],
     symbol_name: Optional[str],
     symbol_resolution: Optional[str],
+    mono: bool,
     font_path: Optional[str],
     symbol_path: Optional[Path],
 ) -> tuple:
@@ -518,6 +539,7 @@ def cache_key_for_request(
         start_size,
         symbol_name or "",
         symbol_resolution or "",
+        mono,
         font_info,
         symbol_info,
     )
@@ -573,6 +595,7 @@ def thumb():
         start_size = int(size_param) if size_param is not None and size_param != "" else None
         symbol_name = request.args.get("symbol")
         symbol_resolution = request.args.get("symbolresolution") or request.args.get("symbolres")
+        mono = str(request.args.get("mono") or "").strip().lower() in ("1", "true", "yes")
 
         font_path = resolve_font_path(font_query)
         if not font_path:
@@ -601,6 +624,7 @@ def thumb():
             start_size,
             symbol_name,
             symbol_resolution,
+            mono,
             font_path,
             symbol_path,
         )
@@ -617,9 +641,7 @@ def thumb():
                 symbol_name,
                 symbol_resolution,
             )
-            buf = io.BytesIO()
-            image.save(buf, format="PNG")
-            return buf.getvalue()
+            return save_png_bytes(image, mono)
 
         png_bytes = get_or_render(key, renderer)
     except ValueError as exc:
@@ -629,6 +651,7 @@ def thumb():
 
     response = send_file(io.BytesIO(png_bytes), mimetype="image/png", download_name="thumb.png")
     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
 @app.get("/")
