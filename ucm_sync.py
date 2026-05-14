@@ -5,6 +5,7 @@ import re
 import time
 import html
 import socket
+import hashlib
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ ENDPOINT_TABLE = "endpoints-output-cisco"
 SETTINGS_TABLE = "endpoints-modulesettings-cisco"
 LOG_FILE = BASE_DIR / "cisco_ucm_sync.log"
 DEFAULT_INTERVAL = 300
+SETTINGS_POLL_INTERVAL = 5
 RIS_BATCH_SIZE = 1000
 SOAP_PREVIEW_BYTES = 2000
 DEFAULT_AXL_VERSION = "14.0"
@@ -68,6 +70,12 @@ def truthy(value):
 
 def setting(settings, name, default=""):
     return str(settings.get(name, default) or "").strip()
+
+
+def settings_fingerprint(settings):
+    items = sorted((str(key), str(value or "")) for key, value in settings.items())
+    raw = repr(items).encode("utf-8", "replace")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def cucm_servers(value):
@@ -1028,19 +1036,41 @@ def sync_once(settings):
 def main():
     requests.packages.urllib3.disable_warnings()
     log("Cisco UCM sync process started")
+    last_fingerprint = None
+    next_run = 0
+
     while True:
-        settings = load_settings()
-        interval = sync_interval(settings)
-        enabled = truthy(setting(settings, "ucmsync"))
-        log(f"UCM sync tick enabled={enabled}")
-        if enabled:
-            try:
-                sync_once(settings)
-            except Exception as exc:
-                log_exception("sync failed", exc)
-        else:
-            log("UCM sync disabled; sleeping")
-        time.sleep(interval)
+        try:
+            settings = load_settings()
+            fingerprint = settings_fingerprint(settings)
+            interval = sync_interval(settings)
+            enabled = truthy(setting(settings, "ucmsync"))
+            now = time.time()
+
+            if last_fingerprint is None:
+                last_fingerprint = fingerprint
+            elif fingerprint != last_fingerprint:
+                log("UCM sync settings changed; applying without service restart")
+                last_fingerprint = fingerprint
+                if enabled:
+                    next_run = now
+
+            log(f"UCM sync tick enabled={enabled}")
+
+            if enabled and now >= next_run:
+                try:
+                    sync_once(settings)
+                except Exception as exc:
+                    log_exception("sync failed", exc)
+                next_run = time.time() + interval
+            elif not enabled:
+                log("UCM sync disabled")
+                next_run = now + interval
+
+        except Exception as exc:
+            log_exception("main loop failed", exc)
+
+        time.sleep(SETTINGS_POLL_INTERVAL)
 
 
 if __name__ == "__main__":
