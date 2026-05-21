@@ -749,6 +749,81 @@ def send_ready_signal(module_name, stream_id):
     except Exception:
         debug_log(f"READY failed module={module_name} stream={stream_id}")
 
+def _xml_softkey_items(softkeys):
+    if not softkeys:
+        return ""
+    items = []
+    for sk in softkeys:
+        if not sk:
+            continue
+        name = saxutils.escape(str(sk.get("name", "") or ""))
+        if not name.strip():
+            continue
+
+        position = sk.get("position", "")
+        pos_xml = ""
+        try:
+            if position is not None and str(position).strip() != "":
+                pos_xml = f"<Position>{int(position)}</Position>"
+        except (TypeError, ValueError):
+            pos_xml = ""
+
+        url = sk.get("url", None)
+        url_down = sk.get("url_down", None)
+
+        url_xml = ""
+        if url is not None and str(url).strip() != "":
+            url_xml = f"<URL>{saxutils.escape(str(url))}</URL>"
+
+        url_down_xml = ""
+        if url_down is not None and str(url_down).strip() != "":
+            url_down_xml = f"<URLDown>{saxutils.escape(str(url_down))}</URLDown>"
+
+        if not url_xml and not url_down_xml:
+            continue
+
+        items.append(
+            "<SoftKeyItem>"
+            f"<Name>{name}</Name>"
+            f"{url_xml}"
+            f"{url_down_xml}"
+            f"{pos_xml}"
+            "</SoftKeyItem>"
+        )
+    return "".join(items)
+
+
+def xml_text_message_with_softkeys(name, text, softkeys=None, prompt="Message text"):
+    title = saxutils.escape("" if name is None else str(name))
+    body = xml_text_content(text)
+    softkeys_xml = _xml_softkey_items(softkeys)
+    return xml_document(
+        "<CiscoIPPhoneText>"
+        f"<Title>{title}</Title>"
+        f"<Prompt>{saxutils.escape(str(prompt or ''))}</Prompt>"
+        f"<Text>{body}</Text>"
+        f"{softkeys_xml}"
+        "</CiscoIPPhoneText>"
+    )
+
+
+def xml_image_message_with_softkeys(name, short_text, bg_color, symbol, image_url, resolution, softkeys=None):
+    title = saxutils.escape("" if name is None else str(name))
+    url = saxutils.escape(image_url)
+    width, height = image_width_height(resolution)
+    softkeys_xml = _xml_softkey_items(softkeys)
+    return xml_document(
+        "<CiscoIPPhoneImageFile>"
+        f"<Title>{title}</Title>"
+        "<Prompt>Select an action</Prompt>"
+        f"<Width>{width}</Width>"
+        f"<Height>{height}</Height>"
+        "<LocationX>0</LocationX>"
+        "<LocationY>0</LocationY>"
+        f"<URL>{url}</URL>"
+        f"{softkeys_xml}"
+        "</CiscoIPPhoneImageFile>"
+    )
 
 def xml_text_message(name, text):
     title = saxutils.escape("" if name is None else str(name))
@@ -892,23 +967,29 @@ def persist_details_snapshot(phone_ip, message, settings=None, message_id=None):
     return snapshot_id
 
 
-def build_visual_payloads(endpoint, message, cisco_settings=None, message_id=None):
+def build_visual_payloads(endpoint, message, cisco_settings=None, message_id=None, stream_id=None):
     visual_mode = normalize_visual_mode(endpoint.get("visual"))
     if visual_mode == "none":
         return []
+
+    softkeys = _stream_softkeys_for_phone(stream_id)
+
     name = message.get("name", "")
     shortmessage = message.get("shortmessage", "")
     longmessage = message.get("longmessage", "")
     text_body = message_text(shortmessage, longmessage)
+
     cisco_settings = cisco_settings or load_cisco_message_settings()
     messageinfo_enabled = bool(cisco_settings.get("messageinfo-enabled"))
     model = endpoint.get("model")
+
     if visual_mode == "image" and model_supports_visual(model):
         color = (message.get("color") or "").strip() or "FFFFFF"
         symbol = (message.get("icon") or "").strip()
         short_text = shortmessage or ""
         resolution = image_resolution_for_model(model)
         image_url = build_image_url(endpoint.get("ipv4"), short_text, color, symbol, model)
+
         payloads = []
         if str(longmessage or "").strip() or messageinfo_enabled:
             snapshot_id = persist_details_snapshot(endpoint.get("ipv4"), message, cisco_settings, message_id=message_id)
@@ -918,10 +999,27 @@ def build_visual_payloads(endpoint, message, cisco_settings=None, message_id=Non
                     xml_execute_url(details_server_url(endpoint.get("ipv4"), "image", snapshot_id)),
                 )
             )
-        payloads.append(("image", xml_image_message(name, short_text, color, symbol, image_url, resolution)))
+
+        payloads.append(
+            (
+                "image",
+                xml_image_message_with_softkeys(
+                    name,
+                    short_text,
+                    color,
+                    symbol,
+                    image_url,
+                    resolution,
+                    softkeys=softkeys,
+                ),
+            )
+        )
+
         if longmessage and str(longmessage).strip():
-            payloads.append(("text", xml_text_message(name, longmessage)))
+            payloads.append(("text", xml_text_message_with_softkeys(name, longmessage, softkeys=softkeys)))
+
         return payloads
+
     if messageinfo_enabled:
         snapshot_id = persist_details_snapshot(endpoint.get("ipv4"), message, cisco_settings, message_id=message_id)
         return [
@@ -929,9 +1027,10 @@ def build_visual_payloads(endpoint, message, cisco_settings=None, message_id=Non
                 "text_details",
                 xml_execute_url(details_server_url(endpoint.get("ipv4"), "text", snapshot_id)),
             ),
-            ("text", xml_text_message(name, text_body)),
+            ("text", xml_text_message_with_softkeys(name, text_body, softkeys=softkeys)),
         ]
-    return [("text", xml_text_message(name, text_body))]
+
+    return [("text", xml_text_message_with_softkeys(name, text_body, softkeys=softkeys))]
 
 
 def send_visual_payload_sequence(ip, payloads):
@@ -942,14 +1041,20 @@ def send_visual_payload_sequence(ip, payloads):
     return False
 
 
-def send_endpoint_visuals(endpoints, message, message_id=None):
+def send_endpoint_visuals(endpoints, message, message_id=None, stream_id=None):
     cisco_settings = load_cisco_message_settings()
     visual_targets = []
     for endpoint in endpoints:
         ip = endpoint.get("ipv4")
         if not ip:
             continue
-        payloads = build_visual_payloads(endpoint, message, cisco_settings, message_id=message_id)
+        payloads = build_visual_payloads(
+            endpoint,
+            message,
+            cisco_settings,
+            message_id=message_id,
+            stream_id=stream_id,
+        )
         if not payloads:
             continue
         visual_targets.append((ip, payloads))
@@ -1064,6 +1169,27 @@ def xml_stop_unicast():
         "</CiscoIPPhoneExecute>"
     )
 
+def _stream_softkeys_for_phone(stream_id):
+    if not stream_id:
+        return []
+    with streams_lock:
+        stream = active_streams.get(stream_id)
+    if not stream:
+        return []
+    mcast_ip = stream.get("mcast_ip")
+    mcast_port = stream.get("mcast_port")
+    if not mcast_ip or not mcast_port:
+        return []
+    start_uri = f"RTPMRx:{mcast_ip}:{int(mcast_port)}"
+    stop_uri = "RTPRx:Stop"
+    return [
+        {
+            "name": "Page",
+            "position": 1,
+            "url_down": start_uri,
+            "url": stop_uri,
+        }
+    ]
 
 def parse_targets(targets):
     target_info = {
@@ -1746,23 +1872,6 @@ def handle_dispatch(action, stream_id, msg_id, targets):
         f"spa_xml_exe_targets={[(target.get('id'), target.get('ipv4'), target.get('macaddress')) for target in spa_xml_exe_targets]} "
         f"msg_type={msg_type}"
     )
-    text_success = True
-    if msg_type in ("text", "text+audio"):
-        if online_endpoints:
-            text_success = send_endpoint_visuals(online_endpoints, message, message_id=msg_id)
-        else:
-            debug_log("no_text_endpoints")
-        if msg_type == "text":
-            spa_text_success = send_spa_xml_exe_visuals(spa_xml_exe_targets, message)
-            text_success = text_success and spa_text_success
-    if msg_type not in ("audio", "text+audio"):
-        if action == "prepare_audio":
-            send_ready_signal("cisco", stream_id)
-        if text_success:
-            clear_auth_credentials(message_key)
-        else:
-            debug_log(f"text message did not fully succeed; retaining auth until TTL message_key={message_key}")
-        return
     audio_ips = [
         endpoint["ipv4"]
         for endpoint in online_endpoints
@@ -1773,10 +1882,42 @@ def handle_dispatch(action, stream_id, msg_id, targets):
         for endpoint in online_endpoints
         if endpoint.get("audio") == "Unicast"
     ]
+
+    if msg_type == "text+audio" and action == "prepare_audio":
+        if audio_ips or unicast_endpoints or spa_multicast_targets:
+            ensure_stream(
+                stream_id,
+                audio_ips,
+                message_key,
+                spa_multicast_targets,
+                unicast_endpoints,
+                "broadcast",
+            )
+
+    text_success = True
+    if msg_type in ("text", "text+audio"):
+        if online_endpoints:
+            text_success = send_endpoint_visuals(online_endpoints, message, message_id=msg_id, stream_id=stream_id)
+        else:
+            debug_log("no_text_endpoints")
+        if msg_type == "text":
+            spa_text_success = send_spa_xml_exe_visuals(spa_xml_exe_targets, message)
+            text_success = text_success and spa_text_success
+
+    if msg_type not in ("audio", "text+audio"):
+        if action == "prepare_audio":
+            send_ready_signal("cisco", stream_id)
+        if text_success:
+            clear_auth_credentials(message_key)
+        else:
+            debug_log(f"text message did not fully succeed; retaining auth until TTL message_key={message_key}")
+        return
+
     if action != "prepare_audio":
         debug_log("audio message arrived on non-prepare action")
         clear_auth_credentials(message_key)
         return
+
     if not audio_ips and not unicast_endpoints and not spa_multicast_targets:
         debug_log("no_audio_ips")
         if spa_xml_exe_targets:
@@ -1784,6 +1925,7 @@ def handle_dispatch(action, stream_id, msg_id, targets):
         send_ready_signal("cisco", stream_id)
         clear_auth_credentials(message_key)
         return
+
     stream, new_ips, new_unicast_ips = ensure_stream(
         stream_id,
         audio_ips,
@@ -1803,6 +1945,7 @@ def handle_dispatch(action, stream_id, msg_id, targets):
         stop_stream(stream_id)
         send_ready_signal("cisco", stream_id)
         return
+
     for endpoint in unicast_endpoints:
         ip = endpoint.get("ipv4")
         if not ip or ip not in new_unicast_ips:
@@ -1810,19 +1953,20 @@ def handle_dispatch(action, stream_id, msg_id, targets):
         server_ip = local_ip_for_phone(ip)
         session, created = add_unicast_source(ip, server_ip, stream_id, "broadcast")
         if created:
-            result = send_phone_request_with_result(ip, xml_start_unicast(server_ip, session["port"]))
-            if not result.get("success"):
+            success, status = send_phone_request_with_result(ip, xml_start_unicast(server_ip, session["port"]))
+            if not success:
                 remove_unicast_sources(stream_id, [ip])
                 with streams_lock:
                     active_stream = active_streams.get(stream_id)
                     if active_stream is not None:
                         active_stream.get("unicast_phone_ips", set()).discard(ip)
                 debug_log(
-                    f"prepare_audio removed failed unicast start ip={ip} status={result.get('status')} "
+                    f"prepare_audio removed failed unicast start ip={ip} status={status} "
                     "device_status_unchanged=true"
                 )
         else:
             debug_log(f"prepare_audio multiplexed unicast ip={ip} stream={stream_id} port={session['port']}")
+
     if msg_type == "text+audio" and spa_xml_exe_targets:
         debug_log(f"prepare_audio delaying spa xml exe seconds={SPA_XML_EXE_AUDIO_DELAY}")
         time.sleep(SPA_XML_EXE_AUDIO_DELAY)
