@@ -1,0 +1,16 @@
+"""Endpoint-module root web page."""
+
+HANDLER_NAME = "render_settings"
+
+def module_web():
+    import importlib.util
+    from pathlib import Path
+    module_dir = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location("cisco_web", module_dir / "web.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+def handle_request(*args, **kwargs):
+    return getattr(module_web(), HANDLER_NAME)(*args, **kwargs)
+
