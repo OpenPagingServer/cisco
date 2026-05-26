@@ -811,7 +811,7 @@ def xml_image_message(name, short_text, bg_color, symbol, image_url, resolution)
     return xml_document(
         "<CiscoIPPhoneImageFile>"
         f"<Title>{title}</Title>"
-        "<Prompt>Select an action</Prompt>"
+        "<Prompt>Select an Action</Prompt>"
         f"<Width>{width}</Width>"
         f"<Height>{height}</Height>"
         "<LocationX>0</LocationX>"
@@ -832,7 +832,7 @@ def build_image_url(phone_ip, short_text, bg_color, symbol, model_value=None):
     }
     if legacy_mono:
         params["mono"] = "1"
-        params["fg"] = "000000"
+        params["fg"] = "000000"1
     if symbol:
         params["symbol"] = str(symbol)
     return f"http://{base_ip}:6975/thumb?{urllib.parse.urlencode(params)}"
