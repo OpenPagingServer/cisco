@@ -105,18 +105,18 @@ def handle_dispatch(action, stream_id, group_id, targets, metadata=None):
             message_send.LIVE_PAGE_SOURCE_KIND,
         )
         if created:
-            result = message_send.send_phone_request_with_result(
+            success, status = message_send.send_phone_request_with_result(
                 ip,
                 message_send.xml_start_unicast(server_ip, session["port"]),
             )
-            if not result.get("success"):
+            if not success:
                 message_send.remove_unicast_sources(stream_id, [ip])
                 with message_send.streams_lock:
                     active_stream = message_send.active_streams.get(stream_id)
                     if active_stream is not None:
                         active_stream.get("unicast_phone_ips", set()).discard(ip)
                 message_send.debug_log(
-                    f"livepage removed failed unicast start ip={ip} status={result.get('status')} device_status_unchanged=true"
+                    f"livepage removed failed unicast start ip={ip} status={status} device_status_unchanged=true"
                 )
         else:
             message_send.debug_log(f"livepage multiplexed unicast ip={ip} stream={stream_id} port={session['port']}")

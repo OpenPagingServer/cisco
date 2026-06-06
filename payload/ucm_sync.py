@@ -26,7 +26,8 @@ DB_NAME = os.getenv("DB_NAME")
 
 ENDPOINT_TABLE = "endpoints-output-cisco"
 SETTINGS_TABLE = "endpoints-modulesettings-cisco"
-LOG_FILE = BASE_DIR / "cisco_ucm_sync.log"
+MODULE_LOG_DIR = Path(os.getenv("OPS_ENDPOINT_MODULE_LOG_DIR", "/var/log/openpagingserver/endpointmodules"))
+LOG_FILE = MODULE_LOG_DIR / "cisco" / "ucm_sync.log"
 DEFAULT_INTERVAL = 300
 SETTINGS_POLL_INTERVAL = 5
 RIS_BATCH_SIZE = 1000
@@ -44,8 +45,12 @@ DEFAULT_SUPPORTED_MODELS = {
 
 def log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(LOG_FILE, "a", encoding="utf-8") as handle:
-        handle.write(f"[{timestamp}] {message}\n")
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] {message}\n")
+    except Exception:
+        pass
 
 
 def log_exception(prefix, exc):

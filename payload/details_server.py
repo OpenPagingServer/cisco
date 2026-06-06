@@ -29,7 +29,8 @@ DB_PASS = os.getenv("DB_PASS")
 DB_NAME = os.getenv("DB_NAME")
 MODULE_SETTINGS_TABLE = "endpoints-modulesettings-cisco"
 DEBUG = os.getenv("DEBUG", "").strip().lower() == "true"
-LOG_FILE = BASE_DIR / "cisco_debug.log"
+MODULE_LOG_DIR = Path(os.getenv("OPS_ENDPOINT_MODULE_LOG_DIR", "/var/log/openpagingserver/endpointmodules"))
+LOG_FILE = MODULE_LOG_DIR / "cisco" / "details_server.log"
 
 
 def debug_log(message):
@@ -37,6 +38,7 @@ def debug_log(message):
         return
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(LOG_FILE, "a", encoding="utf-8") as handle:
             handle.write(f"[{timestamp}] details_server {message}\n")
     except Exception:

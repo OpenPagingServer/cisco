@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 from active_broadcast_store import fetch_active_broadcast
 from broadcasts import legacy_type
+from endpoints import MODULE_LOG_DIR, connect_endpoint_ipc
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR.parent.parent / ".env"
@@ -31,7 +32,7 @@ DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 DB_NAME = os.getenv("DB_NAME")
 DEBUG = os.getenv("DEBUG", "").strip().lower() == "true"
-LOG_FILE = BASE_DIR / "cisco_debug.log"
+LOG_FILE = MODULE_LOG_DIR / "cisco" / "module.log"
 DETAILS_STORE_DIR = BASE_DIR / "details_store"
 ENDPOINT_TABLE = "endpoints-output-cisco"
 SPA_MULTICAST_TABLE = "endpoints-output-cisco-spamulticast"
@@ -40,7 +41,6 @@ SPA_XML_EXE_TABLE = "endpoints-output-cisco-spaxmlexe"
 USERNAME = os.getenv("CISCO_USERNAME", "admin")
 PASSWORD = os.getenv("CISCO_PASSWORD", "admin")
 PAYLOAD_TYPE = 0
-IPC_PORT = 50000
 FRAME_SIZE = 160
 SILENCE_FRAME = b"\xff" * FRAME_SIZE
 SILENCE_INTERVAL = FRAME_SIZE / 8000
@@ -163,6 +163,7 @@ def debug_log(message):
     if not DEBUG:
         return
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG_FILE, "a", encoding="utf-8") as handle:
         handle.write(f"[{timestamp}] {message}\n")
 
@@ -738,12 +739,9 @@ def send_phone_request(ip, xml, timeout_seconds=5):
 
 def send_ready_signal(module_name, stream_id):
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)
-        sock.connect(("127.0.0.1", IPC_PORT))
-        sock.sendall(f"READY {module_name} {stream_id}\n".encode("utf-8"))
-        sock.recv(16)
-        sock.close()
+        with connect_endpoint_ipc(timeout=1) as sock:
+            sock.sendall(f"READY {module_name} {stream_id}\n".encode("utf-8"))
+            sock.recv(16)
         debug_log(f"READY sent module={module_name} stream={stream_id}")
     except Exception:
         debug_log(f"READY failed module={module_name} stream={stream_id}")
@@ -804,14 +802,17 @@ def model_supports_visual(model_value):
     return model.startswith("79") or model.startswith("88") or bool(normalize_model_number(model))
 
 
-def xml_image_message(name, short_text, bg_color, symbol, image_url, resolution):
+def xml_image_message(name, short_text, bg_color, symbol, image_url, resolution, model_value=None):
     title = saxutils.escape("" if name is None else str(name))
     url = saxutils.escape(image_url)
-    width, height = image_width_height(resolution)
+    if normalize_model_number(model_value).startswith("79"):
+        width, height = 0, 0
+    else:
+        width, height = image_width_height(resolution)
     return xml_document(
         "<CiscoIPPhoneImageFile>"
         f"<Title>{title}</Title>"
-        "<Prompt>Select an Action</Prompt>"
+        "<Prompt>Select an action</Prompt>"
         f"<Width>{width}</Width>"
         f"<Height>{height}</Height>"
         "<LocationX>0</LocationX>"
@@ -831,8 +832,9 @@ def build_image_url(phone_ip, short_text, bg_color, symbol, model_value=None):
         "text": "" if short_text is None else str(short_text),
     }
     if legacy_mono:
-        params["mono"] = "1"
-        params["fg"] = "000000"1
+        params["fg"] = "000000"
+        params["dpi"] = "96"
+        params["bitdepth"] = "24"
     if symbol:
         params["symbol"] = str(symbol)
     return f"http://{base_ip}:6975/thumb?{urllib.parse.urlencode(params)}"
@@ -893,7 +895,15 @@ def persist_details_snapshot(phone_ip, message, settings=None, message_id=None):
 
 def build_visual_payloads(endpoint, message, cisco_settings=None, message_id=None):
     visual_mode = normalize_visual_mode(endpoint.get("visual"))
+    ip = endpoint.get("ipv4")
+    model = endpoint.get("model")
+    endpoint_id = endpoint.get("macaddr") or endpoint.get("id") or ip or "<unknown>"
+    debug_log(
+        f"build_visual_payloads endpoint={endpoint_id} ip={ip} "
+        f"visual_raw={endpoint.get('visual')!r} visual_mode={visual_mode} model={model!r}"
+    )
     if visual_mode == "none":
+        debug_log(f"build_visual_payloads skipped endpoint={endpoint_id} reason=visual_disabled")
         return []
     name = message.get("name", "")
     shortmessage = message.get("shortmessage", "")
@@ -901,43 +911,59 @@ def build_visual_payloads(endpoint, message, cisco_settings=None, message_id=Non
     text_body = message_text(shortmessage, longmessage)
     cisco_settings = cisco_settings or load_cisco_message_settings()
     messageinfo_enabled = bool(cisco_settings.get("messageinfo-enabled"))
-    model = endpoint.get("model")
     if visual_mode == "image" and model_supports_visual(model):
         color = (message.get("color") or "").strip() or "FFFFFF"
         symbol = (message.get("icon") or "").strip()
         short_text = shortmessage or ""
         resolution = image_resolution_for_model(model)
-        image_url = build_image_url(endpoint.get("ipv4"), short_text, color, symbol, model)
+        image_url = build_image_url(ip, short_text, color, symbol, model)
         payloads = []
         if str(longmessage or "").strip() or messageinfo_enabled:
-            snapshot_id = persist_details_snapshot(endpoint.get("ipv4"), message, cisco_settings, message_id=message_id)
+            snapshot_id = persist_details_snapshot(ip, message, cisco_settings, message_id=message_id)
             payloads.append(
                 (
                     "image_details",
-                    xml_execute_url(details_server_url(endpoint.get("ipv4"), "image", snapshot_id)),
+                    xml_execute_url(details_server_url(ip, "image", snapshot_id)),
                 )
             )
-        payloads.append(("image", xml_image_message(name, short_text, color, symbol, image_url, resolution)))
+        payloads.append(("image", xml_image_message(name, short_text, color, symbol, image_url, resolution, model)))
         if longmessage and str(longmessage).strip():
             payloads.append(("text", xml_text_message(name, longmessage)))
+        debug_log(
+            f"build_visual_payloads endpoint={endpoint_id} payloads={[label for label, _xml in payloads]} "
+            f"image_url={image_url} resolution={resolution} messageinfo={messageinfo_enabled}"
+        )
         return payloads
+    if visual_mode == "image":
+        debug_log(f"build_visual_payloads endpoint={endpoint_id} image_fallback_text model={model!r}")
     if messageinfo_enabled:
-        snapshot_id = persist_details_snapshot(endpoint.get("ipv4"), message, cisco_settings, message_id=message_id)
-        return [
+        snapshot_id = persist_details_snapshot(ip, message, cisco_settings, message_id=message_id)
+        payloads = [
             (
                 "text_details",
-                xml_execute_url(details_server_url(endpoint.get("ipv4"), "text", snapshot_id)),
+                xml_execute_url(details_server_url(ip, "text", snapshot_id)),
             ),
             ("text", xml_text_message(name, text_body)),
         ]
+        debug_log(
+            f"build_visual_payloads endpoint={endpoint_id} payloads={[label for label, _xml in payloads]} "
+            f"messageinfo={messageinfo_enabled}"
+        )
+        return payloads
+    debug_log(f"build_visual_payloads endpoint={endpoint_id} payloads=['text'] messageinfo={messageinfo_enabled}")
     return [("text", xml_text_message(name, text_body))]
 
 
 def send_visual_payload_sequence(ip, payloads):
+    attempted = []
     for label, xml in payloads:
+        attempted.append(label)
         debug_log(f"send_visual_payload_sequence ip={ip} mode={label} xml={xml[:240]}")
-        if send_phone_request(ip, xml):
+        success, status = send_phone_request_with_result(ip, xml, timeout_seconds=5)
+        debug_log(f"send_visual_payload_result ip={ip} mode={label} success={success} status={status}")
+        if success:
             return True
+    debug_log(f"send_visual_payload_sequence failed ip={ip} attempted={attempted}")
     return False
 
 
@@ -1809,15 +1835,15 @@ def handle_dispatch(action, stream_id, msg_id, targets):
         server_ip = local_ip_for_phone(ip)
         session, created = add_unicast_source(ip, server_ip, stream_id, "broadcast")
         if created:
-            result = send_phone_request_with_result(ip, xml_start_unicast(server_ip, session["port"]))
-            if not result.get("success"):
+            success, status = send_phone_request_with_result(ip, xml_start_unicast(server_ip, session["port"]))
+            if not success:
                 remove_unicast_sources(stream_id, [ip])
                 with streams_lock:
                     active_stream = active_streams.get(stream_id)
                     if active_stream is not None:
                         active_stream.get("unicast_phone_ips", set()).discard(ip)
                 debug_log(
-                    f"prepare_audio removed failed unicast start ip={ip} status={result.get('status')} "
+                    f"prepare_audio removed failed unicast start ip={ip} status={status} "
                     "device_status_unchanged=true"
                 )
         else:
