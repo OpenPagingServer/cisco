@@ -14,6 +14,13 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
+try:
+    from endpoints import BASE_DIR as OPS_BASE_DIR, MODULE_LOG_DIR
+except Exception:
+    OPS_BASE_DIR = Path(os.getenv("OPS_PROJECT_ROOT", "/opt/openpagingserver"))
+    MODULE_LOG_DIR = Path(os.getenv("OPS_ENDPOINT_MODULE_LOG_DIR", "/var/log/openpagingserver/endpointmodules"))
+
+HELPER_LOG_DIR = MODULE_LOG_DIR / "cisco"
 AUTH_IPC_TOKEN = os.getenv("CISCO_AUTH_IPC_TOKEN") or secrets.token_urlsafe(32)
 AUTH_REGISTER_URL = os.getenv("CISCO_AUTH_REGISTER_URL") or "http://127.0.0.1:8082/__ops/register-auth"
 os.environ["CISCO_AUTH_IPC_TOKEN"] = AUTH_IPC_TOKEN
@@ -90,6 +97,44 @@ imggen_proc = None
 authserver_proc = None
 ucm_sync_proc = None
 ucm_sync_log_handle = None
+helper_log_handles = []
+
+
+def helper_env(extra=None):
+    env = os.environ.copy()
+    project_root = Path(os.getenv("OPS_PROJECT_ROOT", str(OPS_BASE_DIR)))
+    pythonpath_parts = [str(project_root)]
+    existing = env.get("PYTHONPATH", "")
+    if existing:
+        pythonpath_parts.append(existing)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    env["OPS_ENDPOINT_MODULE_LOG_DIR"] = str(MODULE_LOG_DIR)
+    if extra:
+        env.update(extra)
+    return env
+
+
+def open_helper_log(filename):
+    try:
+        HELPER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        handle = open(HELPER_LOG_DIR / filename, "a", encoding="utf-8")
+        helper_log_handles.append(handle)
+        return handle
+    except OSError as exc:
+        log(f"cisco helper log open failed file={filename} error={exc}")
+        return subprocess.DEVNULL
+
+
+def close_helper_logs():
+    global ucm_sync_log_handle
+    for handle in list(helper_log_handles):
+        try:
+            handle.close()
+        except Exception:
+            pass
+    helper_log_handles.clear()
+    ucm_sync_log_handle = None
+
 
 def init(core_obj):
     global core, running, thread, imggen_proc, authserver_proc, ucm_sync_proc, ucm_sync_log_handle
@@ -102,24 +147,53 @@ def init(core_obj):
     ucm_sync_path = BASE_DIR / "ucm_sync.py"
 
     if imggen_path.exists():
-        imggen_proc = subprocess.Popen([sys.executable, str(imggen_path)], cwd=BASE_DIR)
+        try:
+            imggen_log_handle = open_helper_log("imggen.log")
+            imggen_proc = subprocess.Popen(
+                [sys.executable, str(imggen_path)],
+                cwd=BASE_DIR,
+                env=helper_env(),
+                stdout=imggen_log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            log(f"cisco imggen started pid={imggen_proc.pid}")
+        except Exception as exc:
+            log(f"cisco imggen start failed: {exc}")
     
     if authserver_path.exists():
-        auth_env = os.environ.copy()
-        auth_env["CISCO_AUTH_IPC_TOKEN"] = AUTH_IPC_TOKEN
-        auth_env["CISCO_AUTH_REGISTER_URL"] = AUTH_REGISTER_URL
-        authserver_proc = subprocess.Popen([sys.executable, str(authserver_path)], cwd=BASE_DIR, env=auth_env)
+        auth_env = helper_env({
+            "CISCO_AUTH_IPC_TOKEN": AUTH_IPC_TOKEN,
+            "CISCO_AUTH_REGISTER_URL": AUTH_REGISTER_URL,
+        })
+        try:
+            auth_log_handle = open_helper_log("authserver.log")
+            authserver_proc = subprocess.Popen(
+                [sys.executable, str(authserver_path)],
+                cwd=BASE_DIR,
+                env=auth_env,
+                stdout=auth_log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            log(f"cisco authserver started pid={authserver_proc.pid}")
+        except Exception as exc:
+            log(f"cisco authserver start failed: {exc}")
 
     if ucm_sync_path.exists():
-        ucm_sync_log_handle = open(BASE_DIR / "cisco_ucm_sync.log", "a", encoding="utf-8")
-        ucm_sync_proc = subprocess.Popen(
-            [sys.executable, str(ucm_sync_path)],
-            cwd=BASE_DIR,
-            stdout=ucm_sync_log_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        log(f"cisco ucm sync started pid={ucm_sync_proc.pid}")
+        try:
+            ucm_sync_log_handle = open_helper_log("ucm_sync.log")
+            ucm_sync_proc = subprocess.Popen(
+                [sys.executable, str(ucm_sync_path)],
+                cwd=BASE_DIR,
+                env=helper_env(),
+                stdout=ucm_sync_log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            log(f"cisco ucm sync started pid={ucm_sync_proc.pid}")
+        except Exception as exc:
+            log(f"cisco ucm sync start failed: {exc}")
 
     try:
         details_server.start()
@@ -537,12 +611,7 @@ def shutdown():
         authserver_proc.terminate()
     if ucm_sync_proc:
         ucm_sync_proc.terminate()
-    if ucm_sync_log_handle:
-        try:
-            ucm_sync_log_handle.close()
-        except Exception:
-            pass
-        ucm_sync_log_handle = None
+    close_helper_logs()
 
 def api_endpoint(command_string):
     message_send.handle_api(command_string)

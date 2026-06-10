@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<info>
-    <name>Cisco IP Phones</name>
-    <version>0.1.0</version>
-    <author>Open Paging Server</author>
-    <desp>Supports audible and visual notification on SEP, SPA/MPP, and phoneOS phones</desp>
-    <type>Output</type>
-    <updated>2026-05-10</updated>
-</info>
