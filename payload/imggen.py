@@ -237,7 +237,28 @@ def text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFon
     bbox = draw.textbbox((0, 0), text, font=font)
     return bbox[2] - bbox[0]
 
-def wrap_paragraph(draw: ImageDraw.ImageDraw, paragraph: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
+def wrap_word_chunks(draw: ImageDraw.ImageDraw, word: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
+    chunks: list[str] = []
+    chunk = ""
+    for ch in word:
+        test_chunk = chunk + ch
+        if text_width(draw, test_chunk, font) <= max_width:
+            chunk = test_chunk
+            continue
+        if chunk:
+            chunks.append(chunk)
+        chunk = ch
+    if chunk:
+        chunks.append(chunk)
+    return chunks or [word]
+
+def wrap_paragraph(
+    draw: ImageDraw.ImageDraw,
+    paragraph: str,
+    font: ImageFont.FreeTypeFont,
+    max_width: int,
+    allow_word_breaks: bool = True,
+) -> list[str]:
     if paragraph == "":
         return [""]
 
@@ -259,27 +280,30 @@ def wrap_paragraph(draw: ImageDraw.ImageDraw, paragraph: str, font: ImageFont.Fr
             current = word
             continue
 
-        chunk = ""
-        for ch in word:
-            test_chunk = chunk + ch
-            if text_width(draw, test_chunk, font) <= max_width:
-                chunk = test_chunk
-            else:
-                if chunk:
-                    lines.append(chunk)
-                chunk = ch
-        current = chunk
+        if not allow_word_breaks:
+            current = word
+            continue
+
+        word_chunks = wrap_word_chunks(draw, word, font, max_width)
+        lines.extend(word_chunks[:-1])
+        current = word_chunks[-1]
 
     if current:
         lines.append(current)
 
     return lines
 
-def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
+def wrap_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    max_width: int,
+    allow_word_breaks: bool = True,
+) -> list[str]:
     lines: list[str] = []
     paragraphs = text.splitlines() if text else [""]
     for idx, paragraph in enumerate(paragraphs):
-        lines.extend(wrap_paragraph(draw, paragraph, font, max_width))
+        lines.extend(wrap_paragraph(draw, paragraph, font, max_width, allow_word_breaks=allow_word_breaks))
         if idx != len(paragraphs) - 1:
             lines.append("")
     return lines if lines else [""]
@@ -323,7 +347,7 @@ def fit_text_advanced(draw, text, font_path, max_width, max_height, start_size):
     while size >= 8:
         font = ImageFont.truetype(font_path, size=size)
         spacing = max(4, size // 6)
-        lines = wrap_text(draw, text, font, max_width)
+        lines = wrap_text(draw, text, font, max_width, allow_word_breaks=False)
         tw, th, metrics = measure_text_block(draw, lines, font, spacing)
 
         if tw <= max_width and th <= max_height:
@@ -336,7 +360,7 @@ def fit_text_advanced(draw, text, font_path, max_width, max_height, start_size):
 
     font = ImageFont.truetype(font_path, size=8)
     spacing = 4
-    lines = wrap_text(draw, text, font, max_width)
+    lines = wrap_text(draw, text, font, max_width, allow_word_breaks=True)
     tw, th, metrics = measure_text_block(draw, lines, font, spacing)
     return font, lines, spacing, tw, th, 8, metrics
 
@@ -429,6 +453,10 @@ def render_thumbnail(
 
     pad = max(16, int(min(work_w, work_h) * 0.08))
     gap = max(12, int(min(work_w, work_h) * 0.05))
+    longest_word = max((len(word) for word in re.split(r"\s+", text or "") if word), default=0)
+    if len(text or "") > 80 or longest_word > 18:
+        pad = max(12, int(pad * 0.75))
+        gap = max(8, int(gap * 0.7))
 
     layout = choose_best_layout(work_w, work_h, pad, gap, text, font_path, start_size, symbol_img, symbol_resolution, draw)
 

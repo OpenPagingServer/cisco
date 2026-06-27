@@ -1,4 +1,5 @@
 import html
+import ipaddress
 import re
 
 
@@ -7,10 +8,16 @@ MULTICAST_TABLE = "endpoints-output-cisco-spamulticast"
 EXE_TABLE = "endpoints-output-cisco-spaxmlexe"
 SETTINGS_TABLE = "endpoints-modulesettings-cisco"
 
-MODELS = ["7811", "7821", "7841", "7861", "7925", "7926", "7931", "7940", "7941", "7942", "7945", "7960", "7961", "7962", "7965", "7970", "7971", "7975", "8811", "8841", "8845", "8851", "8861", "8865", "8875"]
+MODELS = [
+    "7811", "7821", "7841", "7861",
+    "7925", "7926", "7931", "7940", "7941", "7942", "7945", "7960", "7961", "7962", "7965", "7970", "7971", "7975",
+    "8811", "8831", "8841", "8845", "8851", "8861", "8865", "8875", "8961",
+    "9811", "9841", "9851", "9861", "9871",
+    "9951", "9971",
+]
 AUDIO_MODES = ["Multicast", "Unicast", "Disabled"]
 VISUAL_MODES = ["None", "Text", "Image"]
-TEXT_ONLY_MODELS = {"7811", "7821", "7841", "7861"}
+TEXT_ONLY_MODELS = {"7811", "7821", "7841", "7861", "8831", "9811", "9841", "9851"}
 VOLUMES = ["0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100", "asis"]
 DEFAULT_SETTINGS = {
     "messageinfo-enabled": "1",
@@ -37,11 +44,73 @@ def normalize_device_id(value):
     return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
 
 
+def normalize_host_or_ip(value):
+    host = str(value or "").strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1].strip()
+    return host
+
+
+def validate_host_or_ip(value):
+    host = normalize_host_or_ip(value)
+    if not host:
+        raise ValueError("Hostname or IP is required.")
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    if len(host) > 255 or any(ch in host for ch in "/\\?#@"):
+        raise ValueError("Enter a valid hostname, IPv4 address, or IPv6 address.")
+    if any(ch.isspace() for ch in host):
+        raise ValueError("Enter a valid hostname, IPv4 address, or IPv6 address.")
+    return host
+
+
+def ensure_model_enum(cur, table_name):
+    cur.execute(f"SHOW COLUMNS FROM `{table_name}` LIKE 'model'")
+    row = cur.fetchone()
+    if not row:
+        return
+    current_values = re.findall(r"'((?:[^'\\\\]|\\\\.)*)'", str(row.get("Type") or ""))
+    if current_values == ["", *MODELS] and str(row.get("Default") or "") == "":
+        return
+    enum_sql = ",".join(f"'{model}'" for model in ["", *MODELS])
+    placeholders = ",".join(["%s"] * len(MODELS))
+    cur.execute(
+        f"UPDATE `{table_name}` SET `model`='' "
+        f"WHERE `model` IS NOT NULL AND `model` NOT IN ({placeholders})",
+        tuple(MODELS),
+    )
+    cur.execute(
+        f"ALTER TABLE `{table_name}` "
+        f"MODIFY COLUMN `model` ENUM({enum_sql}) NOT NULL DEFAULT ''"
+    )
+
+
+def ensure_varchar_column(cur, table_name, column_name, size):
+    cur.execute(f"SHOW COLUMNS FROM `{table_name}` LIKE %s", (column_name,))
+    row = cur.fetchone()
+    if not row:
+        return
+    column_type = str(row.get("Type") or "").lower()
+    if column_type == f"varchar({size})":
+        return
+    default = row.get("Default")
+    null_sql = "NOT NULL" if row.get("Null") == "NO" else "NULL"
+    escaped_default = str(default).replace("'", "''") if default is not None else ""
+    default_sql = f" DEFAULT '{escaped_default}'" if default is not None else ""
+    cur.execute(
+        f"ALTER TABLE `{table_name}` "
+        f"MODIFY COLUMN `{column_name}` VARCHAR({size}) {null_sql}{default_sql}"
+    )
+
+
 def forms():
     return {
         "enterprise": {
             "label": "Cisco Enterprise (SEP)",
-            "description": "For Cisco 7800, 7900, 8800, and 8900 phones running UCM/Enterprise firmware.",
+            "description": "Send audio and visual messages to Cisco UCM phones<br>7900, 8900, 9900 series phones<br>7800, 8800, 9800 series phones running UCM/Enterprise firmware",
         },
         "spa-multicast": {
             "label": "Cisco SPA Multicast",
@@ -49,7 +118,7 @@ def forms():
         },
         "spa-exe": {
             "label": "Cisco SPA/MPP EXE",
-            "description": "Sends visual notifications to SPA and MPP phones.",
+            "description": "Send visual notifications to Cisco MPP phones<br>SPA series phones<br>7800, 8800, 9800 series phones running MPP/3PCC firmware",
         },
     }
 
@@ -75,7 +144,7 @@ def ensure_schema(conn_factory):
             )
             cur.execute(
                 f"CREATE TABLE IF NOT EXISTS `{EXE_TABLE}` ("
-                "`id` INT NOT NULL AUTO_INCREMENT, `ipv4` VARCHAR(45) NOT NULL DEFAULT '', "
+                "`id` INT NOT NULL AUTO_INCREMENT, `ipv4` VARCHAR(255) NOT NULL DEFAULT '', "
                 "`username` VARCHAR(255) NOT NULL DEFAULT '', `password` VARCHAR(255) NOT NULL DEFAULT '', "
                 "`macaddress` VARCHAR(64) NOT NULL DEFAULT '', `status` VARCHAR(32) NOT NULL DEFAULT 'Unchecked', "
                 "PRIMARY KEY (`id`), KEY `macaddress_idx` (`macaddress`), KEY `ipv4_idx` (`ipv4`), KEY `status_idx` (`status`)"
@@ -86,6 +155,8 @@ def ensure_schema(conn_factory):
                 "`parameter` VARCHAR(128) NOT NULL, `value` TEXT, PRIMARY KEY (`parameter`)"
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
             )
+            ensure_model_enum(cur, ENTERPRISE_TABLE)
+            ensure_varchar_column(cur, EXE_TABLE, "ipv4", 255)
         conn.commit()
     finally:
         conn.close()
@@ -123,8 +194,9 @@ def module_body(content):
         ".control{padding:10px;border:1px solid #ddd;border-radius:4px;font:inherit}.button,button{background:#1976D2;color:#fff;border:0;border-radius:4px;padding:10px 14px;font:inherit;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}.button.secondary{background:#5f6368}"
         ".secondary{background:#5f6368}.danger{background:#c62828}.success{background:#e8f5e9;border:1px solid #a5d6a7;color:#1b5e20;padding:10px;border-radius:6px;margin-bottom:12px}"
         ".error{background:#ffebee;border:1px solid #ef9a9a;color:#b71c1c;padding:10px;border-radius:6px;margin-bottom:12px}.warn{background:#fff8e1;border:1px solid #ffe082;color:#5d4037;padding:12px;border-radius:6px;margin-bottom:12px}"
+        ".info{display:flex;gap:10px;align-items:flex-start;background:#e3f2fd;border:1px solid #90caf9;color:#0d47a1;padding:12px;border-radius:6px;margin-bottom:12px}.info .icon{font-weight:700;line-height:1}"
         ".hidden{display:none!important}.note,.meta{color:#5f6368}.section{border-top:1px solid #eee;padding-top:12px;margin-top:4px}.title{font-size:22px;font-weight:600;margin:0 0 14px}.subtitle{margin:0 0 18px;color:#5f6368}.selected-model{background:#E3F2FD;border:1px solid #90CAF9;color:#0D47A1;padding:10px;border-radius:6px;margin-bottom:12px}.topbar{display:flex;align-items:center;gap:10px;margin-bottom:14px}.audio-key{font-size:13px;color:#5f6368;line-height:1.45;margin-top:2px}.audio-key div{margin:4px 0}.audio-key strong{color:#202124}"
-        "@media(prefers-color-scheme:dark){body{background:#1e1e1e;color:#e0e0e0}.control{background:#171717;border-color:#333;color:#eee}.button,button{background:#BB86FC;color:#000}.button.secondary{background:#444;color:#eee}.subtitle,.note,.meta,.audio-key{color:#aaa}.selected-model{background:#102334;border-color:#24577d;color:#b8ddff}.audio-key strong{color:#e0e0e0}}</style>"
+        "@media(prefers-color-scheme:dark){body{background:#1e1e1e;color:#e0e0e0}.control{background:#171717;border-color:#333;color:#eee}.button,button{background:#BB86FC;color:#000}.button.secondary{background:#444;color:#eee}.subtitle,.note,.meta,.audio-key{color:#aaa}.selected-model{background:#102334;border-color:#24577d;color:#b8ddff}.audio-key strong{color:#e0e0e0}.info{background:#102334;border-color:#24577d;color:#b8ddff}}</style>"
         + content
     )
 
@@ -161,6 +233,13 @@ def render_form(form_type, request, conn_factory, page, user):
     ensure_schema(conn_factory)
     if form_type not in forms():
         return page("Endpoint Form", module_body("<h1>Endpoint form not found</h1>"), "endpoints", user, status=404)
+    if form_type == "spa-multicast":
+        deprecated_body = (
+            "<div class='warn'><strong>Deprecated</strong><p>"
+            "Starting in Open Paging Server 0.4.0, Multicast RTP is now built-in. Since Cisco SPA &amp; MPP frimware phones accept any Multicast RTP stream, this eliminates the need for this functionally in the module. Existing endpoints will remain functional. However, you should move over since this will be removed before the first stable OPS release."
+            "</p></div>"
+        )
+        return page(forms()[form_type]["label"], module_body(deprecated_body), "endpoints", user)
     message = ""
     error = ""
     selected_model = str(request.form.get("model", "") or "").strip()
@@ -201,13 +280,15 @@ def render_form(form_type, request, conn_factory, page, user):
                 execute(conn_factory, f"INSERT INTO `{MULTICAST_TABLE}` (name, address, port) VALUES (%s,%s,%s)", (values["name"], values["address"], validate_port(values["port"])))
                 message = "Cisco SPA multicast endpoint added."
             elif form_type == "spa-exe":
-                mac = normalize_device_id(values["macaddress"])
-                if not values["ipv4"] or not mac:
-                    raise ValueError("IPv4 address and MAC address are required.")
-                if query_one(conn_factory, f"SELECT id FROM `{EXE_TABLE}` WHERE macaddress=%s", (mac,)):
-                    raise ValueError("That SPA EXE MAC address already exists.")
+                label = str(values["macaddress"] or "").strip()
+                label_token = normalize_device_id(label)
+                host = validate_host_or_ip(values["ipv4"])
+                if not label_token:
+                    raise ValueError("Label is required.")
+                if any(normalize_device_id(row.get("macaddress")) == label_token for row in query_all(conn_factory, f"SELECT id, macaddress FROM `{EXE_TABLE}`")):
+                    raise ValueError("That SPA EXE label already exists.")
                 status = "Unchecked" if request.form.get("unchecked") else "New"
-                execute(conn_factory, f"INSERT INTO `{EXE_TABLE}` (ipv4, username, password, macaddress, status) VALUES (%s,%s,%s,%s,%s)", (values["ipv4"], values["username"], values["password"], mac, status))
+                execute(conn_factory, f"INSERT INTO `{EXE_TABLE}` (ipv4, username, password, macaddress, status) VALUES (%s,%s,%s,%s,%s)", (host, values["username"], values["password"], label, status))
                 message = "Cisco SPA EXE endpoint added."
         except Exception as exc:
             error = str(exc)
@@ -238,12 +319,13 @@ def render_form(form_type, request, conn_factory, page, user):
             "<button class='button' type='submit'>Add Cisco SPA Multicast Endpoint</button></form>"
         )
     else:
+        info = "<div class='info'><div class='icon'>i</div><div>To send audio, use a Multicast RTP or SIP endpoint</div></div>"
         body = (
-            f"{alert(message, error)}<form method='post' class='grid'>"
-            f"<div class='row'><label>IPv4 Address</label><input class='control' name='ipv4' value='{h(values['ipv4'])}' required></div>"
+            f"{alert(message, error)}{info}<form method='post' class='grid'>"
+            f"<div class='row'><label>Label</label><input class='control' name='macaddress' value='{h(values['macaddress'])}' required></div>"
+            f"<div class='row'><label>Hostname or IP</label><input class='control' name='ipv4' value='{h(values['ipv4'])}' placeholder='phone.example.local or 2001:db8::10' required></div>"
             f"<div class='row'><label>Username</label><input class='control' name='username' value='{h(values['username'])}'></div>"
             f"<div class='row'><label>Password</label><input class='control' type='password' name='password' value='{h(values['password'])}'></div>"
-            f"<div class='row'><label>MAC Address</label><input class='control' name='macaddress' value='{h(values['macaddress'])}' required></div>"
             "<label class='check'><input type='checkbox' name='unchecked' value='1'> Do not check status</label><button class='button' type='submit'>Add Cisco SPA EXE Endpoint</button></form>"
         )
     return page(forms()[form_type]["label"], module_body(body), "endpoints", user)
@@ -301,12 +383,15 @@ def render_action(action, endpoint_id, request, conn_factory, page, user):
                 port = validate_port(request.form.get("port"))
                 execute(conn_factory, f"UPDATE `{MULTICAST_TABLE}` SET name=%s, address=%s, port=%s WHERE id=%s", (name, address, port, row["id"]))
             elif kind == "spa-exe":
-                mac = normalize_device_id(request.form.get("macaddress"))
-                if not mac or not request.form.get("ipv4"):
-                    raise ValueError("IPv4 address and MAC address are required.")
-                if query_one(conn_factory, f"SELECT id FROM `{EXE_TABLE}` WHERE macaddress=%s AND id<>%s", (mac, row["id"])):
-                    raise ValueError("That SPA EXE MAC address already exists.")
-                execute(conn_factory, f"UPDATE `{EXE_TABLE}` SET ipv4=%s, username=%s, password=%s, macaddress=%s WHERE id=%s", (request.form.get("ipv4"), request.form.get("username", ""), request.form.get("password", ""), mac, row["id"]))
+                label = str(request.form.get("macaddress", "") or "").strip()
+                label_token = normalize_device_id(label)
+                host = validate_host_or_ip(request.form.get("ipv4"))
+                if not label_token:
+                    raise ValueError("Label is required.")
+                existing_rows = query_all(conn_factory, f"SELECT id, macaddress FROM `{EXE_TABLE}` WHERE id<>%s", (row["id"],))
+                if any(normalize_device_id(existing.get("macaddress")) == label_token for existing in existing_rows):
+                    raise ValueError("That SPA EXE label already exists.")
+                execute(conn_factory, f"UPDATE `{EXE_TABLE}` SET ipv4=%s, username=%s, password=%s, macaddress=%s WHERE id=%s", (host, request.form.get("username", ""), request.form.get("password", ""), label, row["id"]))
             else:
                 mac = normalize_device_id(request.form.get("macaddr"))
                 if mac and not mac.startswith("SEP"):
@@ -335,7 +420,7 @@ def render_action(action, endpoint_id, request, conn_factory, page, user):
     if kind == "spa-multicast":
         body = f"{alert(message, error)}<form method='post' class='grid'><div class='row'><label>Name</label><input class='control' name='name' value='{h(row.get('name'))}' required></div><div class='row'><label>Multicast Address</label><input class='control' name='address' value='{h(row.get('address'))}' required></div><div class='row'><label>Port</label><input class='control' type='number' name='port' min='1' max='65535' value='{h(row.get('port'))}' required></div><button class='button'>Save Cisco SPA Multicast Endpoint</button></form>"
     elif kind == "spa-exe":
-        body = f"{alert(message, error)}<p class='meta'>Current status: {h(row.get('status'))}</p><form method='post' class='grid'><input type='hidden' name='_lookup_id' value='{h(row.get('id'))}'><div class='row'><label>IPv4 Address</label><input class='control' name='ipv4' value='{h(row.get('ipv4'))}' required></div><div class='row'><label>Username</label><input class='control' name='username' value='{h(row.get('username'))}'></div><div class='row'><label>Password</label><input class='control' type='password' name='password' value='{h(row.get('password'))}'></div><div class='row'><label>MAC Address</label><input class='control' name='macaddress' value='{h(row.get('macaddress'))}' required></div><button class='button'>Save Cisco SPA EXE Endpoint</button></form>"
+        body = f"{alert(message, error)}<div class='info'><div class='icon'>i</div><div>To send audio, use a Multicast RTP or SIP endpoint</div></div><p class='meta'>Current status: {h(row.get('status'))}</p><form method='post' class='grid'><input type='hidden' name='_lookup_id' value='{h(row.get('id'))}'><div class='row'><label>Label</label><input class='control' name='macaddress' value='{h(row.get('macaddress'))}' required></div><div class='row'><label>Hostname or IP</label><input class='control' name='ipv4' value='{h(row.get('ipv4'))}' placeholder='phone.example.local or 2001:db8::10' required></div><div class='row'><label>Username</label><input class='control' name='username' value='{h(row.get('username'))}'></div><div class='row'><label>Password</label><input class='control' type='password' name='password' value='{h(row.get('password'))}'></div><button class='button'>Save Cisco SPA EXE Endpoint</button></form>"
     else:
         visual_modes = active_visual_modes(row.get("model"))
         body = (

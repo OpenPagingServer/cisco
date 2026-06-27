@@ -21,6 +21,10 @@ def normalize_mac(value):
     return "".join(ch for ch in str(value).upper() if ch.isalnum())
 
 
+def normalize_token(value):
+    return str(value or "").strip()
+
+
 def xml_document(body):
     return f'<?xml version="1.0" encoding="UTF-8"?>{body}'
 
@@ -59,16 +63,22 @@ def user_agent_mac(user_agent):
     return normalize_mac(match.group(1))
 
 
-def store_text_message(title, prompt, text, allowed_macs):
+def store_text_message(title, prompt, text, allowed_tokens):
     message_id = uuid.uuid4().hex
-    allowed = {normalize_mac(mac) for mac in allowed_macs if normalize_mac(mac)}
+    allowed = [normalize_token(token) for token in allowed_tokens if normalize_token(token)]
     payload = text_page(title, prompt, text)
     with messages_lock:
         messages[message_id] = {
             "body": payload,
-            "allowed_macs": allowed,
+            "allowed_tokens": allowed,
         }
     return message_id
+
+
+def message_tokens(message_id):
+    with messages_lock:
+        record = messages.get(message_id) or {}
+    return list(record.get("allowed_tokens", []))
 
 
 def clear_message(message_id):
@@ -95,11 +105,9 @@ class Handler(BaseHTTPRequestHandler):
         if record is None:
             self.send_404(expired_page())
             return
-        mac = user_agent_mac(self.headers.get("User-Agent", ""))
-        if not mac:
-            self.send_empty_403()
-            return
-        if mac not in record.get("allowed_macs", set()):
+        token = urllib.parse.parse_qs(parsed.query).get("token", [""])[0]
+        allowed_tokens = record.get("allowed_tokens", [])
+        if not token or token not in allowed_tokens:
             self.send_empty_403()
             return
         self.send_xml(200, record["body"])

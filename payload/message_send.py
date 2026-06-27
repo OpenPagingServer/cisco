@@ -1,6 +1,7 @@
 
 import os
 import json
+import ipaddress
 import locale
 import random
 import secrets
@@ -58,11 +59,17 @@ LIVE_PAGE_OVERLAP_BOOST = 1.25
 DEFAULT_IMAGE_RESOLUTION = "298x168"
 MODEL_EXACT_IMAGE_RESOLUTIONS = {
     "8845": "600x300",
+    "8961": "600x300",
+    "9861": "600x300",
+    "9871": "600x300",
+    "9951": "600x300",
+    "9971": "600x300",
 }
 MODEL_PREFIX_IMAGE_RESOLUTIONS = {
     "88": "600x300",
 }
 LEGACY_MONO_IMAGE_MODELS = {"7940", "7941", "7942", "7960", "7961", "7962"}
+TEXT_ONLY_VISUAL_MODELS = {"7811", "7821", "7841", "7861", "8831", "9811", "9841", "9851"}
 
 rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
 rtp_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
@@ -205,6 +212,34 @@ def normalize_model_number(value):
         elif started:
             break
     return digits or token
+
+
+def normalize_network_host(value):
+    host = str(value or "").strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1].strip()
+    return host
+
+
+def is_ipv6_address(value):
+    try:
+        return ipaddress.ip_address(normalize_network_host(value)).version == 6
+    except ValueError:
+        return False
+
+
+def http_host(value):
+    host = normalize_network_host(value)
+    if is_ipv6_address(host):
+        return f"[{host}]"
+    return host
+
+
+def http_url(host, path, port=None):
+    formatted_host = http_host(host)
+    if port is None:
+        return f"http://{formatted_host}{path}"
+    return f"http://{formatted_host}:{port}{path}"
 
 
 def image_resolution_for_model(model_value):
@@ -445,7 +480,7 @@ def response_success(response):
 
 def post_phone_execute(ip, xml, auth, auth_label, timeout_seconds):
     response = requests.post(
-        f"http://{ip}/CGI/Execute",
+        http_url(ip, "/CGI/Execute"),
         data={"XML": xml},
         auth=auth,
         timeout=timeout_seconds,
@@ -778,14 +813,25 @@ def xml_text_message_with_back(name, text, back_url):
 
 
 def local_ip_for_phone(phone_ip):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    host = normalize_network_host(phone_ip)
+    candidates = []
     try:
-        sock.connect((phone_ip, 9))
-        return sock.getsockname()[0]
+        infos = socket.getaddrinfo(host, 9, type=socket.SOCK_DGRAM)
     except OSError:
         return "127.0.0.1"
-    finally:
-        sock.close()
+    for family, socktype, proto, _canonname, sockaddr in infos:
+        sock = socket.socket(family, socktype, proto)
+        try:
+            sock.connect(sockaddr)
+            local_ip = sock.getsockname()[0]
+            if family == socket.AF_INET:
+                return local_ip
+            candidates.append(local_ip)
+        except OSError:
+            continue
+        finally:
+            sock.close()
+    return candidates[0] if candidates else "127.0.0.1"
 
 
 def normalize_visual_mode(value):
@@ -798,8 +844,10 @@ def normalize_visual_mode(value):
 
 
 def model_supports_visual(model_value):
-    model = "" if model_value is None else str(model_value).strip()
-    return model.startswith("79") or model.startswith("88") or bool(normalize_model_number(model))
+    model = normalize_model_number(model_value)
+    if not model or model in TEXT_ONLY_VISUAL_MODELS:
+        return False
+    return True
 
 
 def xml_image_message(name, short_text, bg_color, symbol, image_url, resolution, model_value=None):
@@ -815,9 +863,14 @@ def xml_image_message(name, short_text, bg_color, symbol, image_url, resolution,
         "<Prompt>Select an action</Prompt>"
         f"<Width>{width}</Width>"
         f"<Height>{height}</Height>"
-        "<LocationX>0</LocationX>"
-        "<LocationY>0</LocationY>"
+        "<LocationX>-1</LocationX>"
+        "<LocationY>-1</LocationY>"
         f"<URL>{url}</URL>"
+        "<SoftKeyItem>"
+        "<Name>Exit</Name>"
+        f"<URL>{xml_services_exit_uri()}</URL>"
+        "<Position>1</Position>"
+        "</SoftKeyItem>"
         "</CiscoIPPhoneImageFile>"
     )
 
@@ -837,13 +890,13 @@ def build_image_url(phone_ip, short_text, bg_color, symbol, model_value=None):
         params["bitdepth"] = "24"
     if symbol:
         params["symbol"] = str(symbol)
-    return f"http://{base_ip}:6975/thumb?{urllib.parse.urlencode(params)}"
+    return f"{http_url(base_ip, '/thumb', 6975)}?{urllib.parse.urlencode(params)}"
 
 
 def details_server_url(phone_ip, path, snapshot_id):
     base_ip = local_ip_for_phone(phone_ip)
     port = os.getenv("CISCO_DETAILS_PORT", "6967")
-    return f"http://{base_ip}:{port}/{path}?id={urllib.parse.quote(snapshot_id)}"
+    return f"{http_url(base_ip, f'/{path}', port)}?id={urllib.parse.quote(snapshot_id)}"
 
 
 def build_snapshot_image_url(phone_ip, snapshot_id):
@@ -857,6 +910,10 @@ def xml_execute_url(url):
         f"<ExecuteItem Priority=\"0\" URL=\"{safe_url}\"/>"
         "</CiscoIPPhoneExecute>"
     )
+
+
+def xml_services_exit_uri():
+    return "Init:Services"
 
 
 def persist_details_snapshot(phone_ip, message, settings=None, message_id=None):
@@ -1013,7 +1070,7 @@ def post_spa_xml_execute(target, xml):
     for auth_label, auth in auth_attempts:
         try:
             response = requests.post(
-                f"http://{ip}/CGI/Execute",
+                http_url(ip, "/CGI/Execute"),
                 data={"XML": xml},
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 auth=auth,
@@ -1037,18 +1094,18 @@ def send_spa_xml_exe_visuals(targets, message):
     if spa_xml_server is None:
         debug_log("send_spa_xml_exe_visuals skipped missing_spa_xml_server")
         return False
-    allowed_macs = [target["macaddress"] for target in targets]
+    access_tokens = [secrets.token_urlsafe(16) for _ in targets]
     message_id = spa_xml_server.store_text_message(
         message.get("name") or "",
         message.get("shortmessage") or "",
         message.get("longmessage") or "",
-        allowed_macs,
+        access_tokens,
     )
     results = []
-    for target in targets:
+    for target, access_token in zip(targets, access_tokens):
         server_ip = local_ip_for_phone(target["ipv4"])
         port = os.getenv("CISCO_SPA_XML_PORT", "6989")
-        url = f"http://{server_ip}:{port}/{message_id}.xml"
+        url = f"{http_url(server_ip, f'/{message_id}.xml', port)}?token={urllib.parse.quote(access_token)}"
         xml = xml_spa_execute_url(url)
         debug_log(
             f"send_spa_xml_exe_visual target={target.get('macaddress')} ip={target.get('ipv4')} url={url}"

@@ -5,6 +5,7 @@ import time
 import html
 import socket
 import hashlib
+import ipaddress
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
@@ -36,12 +37,14 @@ DEFAULT_AXL_VERSION = "14.0"
 FALLBACK_AXL_VERSIONS = ("12.5", "12.0", "11.5", "11.0")
 AUTH_URL_MARKER = os.getenv("CISCO_AUTH_EXPECTED_MARKER", ":8082").strip()
 DEFAULT_SUPPORTED_MODELS = {
-    "7821", "7841", "7861", "8831"
+    "7811", "7821", "7841", "7861", "8831",
     "7925", "7926", "7931", "7940", "7941", "7942", "7945",
     "7960", "7961", "7962", "7965", "7970", "7971", "7975",
-    "8811", "8841", "8845", "8851", "8861", "8865", 
-    "9871", "9861"
+    "8811", "8841", "8845", "8851", "8861", "8865", "8875", "8961",
+    "9811", "9841", "9851", "9861", "9871",
+    "9951", "9971",
 }
+TEXT_ONLY_MODELS = {"7811", "7821", "7841", "7861", "8831", "9811", "9841", "9851"}
 
 
 def log(message):
@@ -230,20 +233,7 @@ def ensure_ucm_columns():
                     "ADD COLUMN addedby ENUM('MANUAL','UCM') NOT NULL DEFAULT 'MANUAL'"
                 )
             ensure_enum_member(cur, ENDPOINT_TABLE, "status", "New")
-            model_def = definitions.get("model")
-            model_type = str(model_def.get("Type", "") if model_def else "")
-            if model_def and not model_type.lower().startswith("enum("):
-                enum_sql = ",".join(f"'{model}'" for model in sorted(DEFAULT_SUPPORTED_MODELS))
-                log(f"restoring model column to supported-model enum from {model_type}")
-                cur.execute(
-                    f"UPDATE `{ENDPOINT_TABLE}` SET model='' "
-                    f"WHERE model IS NOT NULL AND model NOT IN ({','.join(['%s'] * len(DEFAULT_SUPPORTED_MODELS))})",
-                    tuple(sorted(DEFAULT_SUPPORTED_MODELS)),
-                )
-                cur.execute(
-                    f"ALTER TABLE `{ENDPOINT_TABLE}` "
-                    f"MODIFY COLUMN model ENUM('',{enum_sql}) NOT NULL DEFAULT ''"
-                )
+            ensure_model_enum(cur)
         conn.commit()
     finally:
         conn.close()
@@ -253,6 +243,31 @@ def enum_values_from_type(column_type):
     if not str(column_type or "").lower().startswith("enum("):
         return set()
     return set(re.findall(r"'((?:[^'\\\\]|\\\\.)*)'", column_type))
+
+
+def ensure_model_enum(cur):
+    definitions = table_column_defs(cur, ENDPOINT_TABLE)
+    model_def = definitions.get("model")
+    if not model_def:
+        return
+    current_type = str(model_def.get("Type", ""))
+    if not current_type.lower().startswith("enum("):
+        log(f"restoring model column to supported-model enum from {current_type}")
+    values = enum_values_from_type(current_type)
+    target_values = {"", *DEFAULT_SUPPORTED_MODELS}
+    if values == target_values:
+        return
+    placeholders = ",".join(["%s"] * len(DEFAULT_SUPPORTED_MODELS))
+    cur.execute(
+        f"UPDATE `{ENDPOINT_TABLE}` SET model='' "
+        f"WHERE model IS NOT NULL AND model NOT IN ({placeholders})",
+        tuple(sorted(DEFAULT_SUPPORTED_MODELS)),
+    )
+    enum_sql = ",".join(f"'{model}'" for model in ["", *sorted(DEFAULT_SUPPORTED_MODELS)])
+    cur.execute(
+        f"ALTER TABLE `{ENDPOINT_TABLE}` "
+        f"MODIFY COLUMN model ENUM({enum_sql}) NOT NULL DEFAULT ''"
+    )
 
 
 def ensure_enum_member(cur, table, column, value):
@@ -311,6 +326,22 @@ def normalize_device_name(value):
 def model_number(value):
     match = re.search(r"(\d{4})", str(value or ""))
     return match.group(1) if match else ""
+
+
+def default_visual_mode_for_model(model):
+    return "Text" if str(model or "") in TEXT_ONLY_MODELS else "Image"
+
+
+def http_host(value):
+    host = str(value or "").strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1].strip()
+    try:
+        if ipaddress.ip_address(host).version == 6:
+            return f"[{host}]"
+    except ValueError:
+        pass
+    return host
 
 
 def axl_operation(name, body, version=DEFAULT_AXL_VERSION):
@@ -870,7 +901,7 @@ def apply_phones(phones):
                         ("ipv4", desired_ipv4),
                         ("status", desired_status),
                         ("model", phone.get("model", "")),
-                        ("visual", "Image"),
+                        ("visual", default_visual_mode_for_model(phone.get("model", ""))),
                         ("addedby", "UCM"),
                     ):
                         if column in columns:
@@ -892,7 +923,7 @@ def apply_phones(phones):
                     "status": "New" if phone.get("ipv4") else "Offline",
                     "audio": "Multicast",
                     "model": phone.get("model", ""),
-                    "visual": "Image",
+                    "visual": default_visual_mode_for_model(phone.get("model", "")),
                     "addedby": "UCM",
                 }
                 insert_columns = [column for column in insert_values if column in columns]
@@ -915,7 +946,7 @@ def apply_phones(phones):
 
 
 def check_phone(ip):
-    url = f"http://{ip}/CGI/Java/Serviceability?adapter=device.statistics.configuration"
+    url = f"http://{http_host(ip)}/CGI/Java/Serviceability?adapter=device.statistics.configuration"
     try:
         response = requests.get(url, timeout=3)
         if response.status_code != 200:

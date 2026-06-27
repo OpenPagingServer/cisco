@@ -6,6 +6,7 @@ import threading
 import subprocess
 import importlib.util
 import secrets
+import ipaddress
 import requests
 import pymysql
 import re
@@ -23,6 +24,14 @@ except Exception:
 HELPER_LOG_DIR = MODULE_LOG_DIR / "cisco"
 AUTH_IPC_TOKEN = os.getenv("CISCO_AUTH_IPC_TOKEN") or secrets.token_urlsafe(32)
 AUTH_REGISTER_URL = os.getenv("CISCO_AUTH_REGISTER_URL") or "http://127.0.0.1:8082/__ops/register-auth"
+SUPPORTED_MODELS = (
+    "",
+    "7811", "7821", "7841", "7861",
+    "7925", "7926", "7931", "7940", "7941", "7942", "7945", "7960", "7961", "7962", "7965", "7970", "7971", "7975",
+    "8811", "8831", "8841", "8845", "8851", "8861", "8865", "8875", "8961",
+    "9811", "9841", "9851", "9861", "9871",
+    "9951", "9971",
+)
 os.environ["CISCO_AUTH_IPC_TOKEN"] = AUTH_IPC_TOKEN
 os.environ["CISCO_AUTH_REGISTER_URL"] = AUTH_REGISTER_URL
 
@@ -261,6 +270,23 @@ def table_column_defs(cur, table):
     return {row["Field"]: row for row in cur.fetchall()}
 
 
+def ensure_varchar_column(cur, table, column, size):
+    definitions = table_column_defs(cur, table)
+    column_def = definitions.get(column)
+    if column_def is None:
+        return
+    current_type = str(column_def.get("Type", "")).lower()
+    if current_type == f"varchar({size})":
+        return
+    default = column_def.get("Default")
+    null_sql = "NOT NULL" if column_def.get("Null") == "NO" else "NULL"
+    default_sql = f" DEFAULT '{default}'" if default is not None else ""
+    cur.execute(
+        f"ALTER TABLE `{table}` "
+        f"MODIFY COLUMN `{column}` VARCHAR({size}) {null_sql}{default_sql}"
+    )
+
+
 def ensure_enum_column(cur, table, column, values, default, after_column=None):
     definitions = table_column_defs(cur, table)
     enum_sql = ",".join(f"'{value}'" for value in values)
@@ -295,6 +321,13 @@ def ensure_cisco_endpoint_schema(cur):
     ensure_enum_column(
         cur,
         ENDPOINT_TABLE,
+        "model",
+        SUPPORTED_MODELS,
+        "",
+    )
+    ensure_enum_column(
+        cur,
+        ENDPOINT_TABLE,
         "status",
         ("New", "Unchecked", "Offline", "Online"),
         "Unchecked",
@@ -326,6 +359,7 @@ def ensure_cisco_endpoint_schema(cur):
 
 
 def ensure_cisco_spa_xml_exe_schema(cur):
+    ensure_varchar_column(cur, SPA_XML_EXE_TABLE, "ipv4", 255)
     ensure_enum_column(
         cur,
         SPA_XML_EXE_TABLE,
@@ -355,6 +389,18 @@ def ensure_database_schema():
         log(f"cisco database schema checked statements={len(statements)}")
     finally:
         conn.close()
+
+
+def http_host(value):
+    host = str(value or "").strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1].strip()
+    try:
+        if ipaddress.ip_address(host).version == 6:
+            return f"[{host}]"
+    except ValueError:
+        pass
+    return host
 
 
 ENDPOINT_TABLE = "endpoints-output-cisco"
@@ -516,7 +562,7 @@ def get_endpoint_status():
 
 
 def check_phone(ip):
-    url = f"http://{ip}/CGI/Java/Serviceability?adapter=device.statistics.configuration"
+    url = f"http://{http_host(ip)}/CGI/Java/Serviceability?adapter=device.statistics.configuration"
     try:
         r = requests.get(url, timeout=3)
         if r.status_code != 200:

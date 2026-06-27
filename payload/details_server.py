@@ -1,5 +1,6 @@
 
 import json
+import ipaddress
 import locale
 import os
 import time
@@ -53,6 +54,10 @@ def xml_text_content(value):
     text = "" if value is None else str(value)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     return saxutils.escape(text).replace("\n", "&#10;")
+
+
+def xml_services_exit_uri():
+    return "Init:Services"
 
 
 def reset_store():
@@ -118,6 +123,26 @@ def first_nonempty_value(*values):
         if value is not None and str(value).strip() != "":
             return str(value).strip()
     return ""
+
+
+def is_ipv6_address(value):
+    try:
+        return ipaddress.ip_address(str(value or "").strip()).version == 6
+    except ValueError:
+        return False
+
+
+def http_host(value):
+    host = str(value or "").strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1].strip()
+    if is_ipv6_address(host):
+        return f"[{host}]"
+    return host
+
+
+def http_url(server_ip, path, port):
+    return f"http://{http_host(server_ip)}:{port}{path}"
 
 
 def system_prefers_12_hour_time():
@@ -451,11 +476,11 @@ def thumb_source_url(server_ip, snapshot):
     icon = snapshot.get("icon") or ""
     if icon:
         params["symbol"] = icon
-    return f"http://{server_ip}:6975/thumb?{urllib.parse.urlencode(params)}"
+    return f"{http_url(server_ip, '/thumb', 6975)}?{urllib.parse.urlencode(params)}"
 
 
 def image_url(server_ip, snapshot_id):
-    return f"http://{server_ip}:6967/thumb?id={urllib.parse.quote(snapshot_id)}"
+    return f"{http_url(server_ip, '/thumb', 6967)}?id={urllib.parse.quote(snapshot_id)}"
 
 
 def image_page(server_ip, snapshot_id, snapshot):
@@ -470,20 +495,20 @@ def image_page(server_ip, snapshot_id, snapshot):
         "<CiscoIPPhoneImageFile>",
         f"<Title>{title}</Title>",
         "<Prompt>Select an action</Prompt>",
-        "<LocationX>0</LocationX>",
-        "<LocationY>0</LocationY>",
+        "<LocationX>-1</LocationX>",
+        "<LocationY>-1</LocationY>",
         f"<URL>{image}</URL>",
+        "<SoftKeyItem>",
+        "<Name>Exit</Name>",
+        f"<URL>{xml_services_exit_uri()}</URL>",
+        "<Position>1</Position>",
+        "</SoftKeyItem>",
     ]
     if has_details:
         detail_path = "details" if has_text else "info"
-        detail_url = saxutils.escape(f"http://{server_ip}:6967/{detail_path}?id={urllib.parse.quote(snapshot_id)}")
+        detail_url = saxutils.escape(f"{http_url(server_ip, f'/{detail_path}', 6967)}?id={urllib.parse.quote(snapshot_id)}")
         parts.extend(
             [
-                "<SoftKeyItem>",
-                "<Name>Exit</Name>",
-                "<URL>SoftKey:Exit</URL>",
-                "<Position>1</Position>",
-                "</SoftKeyItem>",
                 "<SoftKeyItem>",
                 "<Name>Details</Name>",
                 f"<URL>{detail_url}</URL>",
@@ -500,7 +525,7 @@ def details_page(server_ip, snapshot_id, snapshot):
     snapshot = hydrate_snapshot_message_fields(snapshot)
     title = saxutils.escape(snapshot.get("name") or "")
     body = xml_text_content(snapshot.get("longmessage") or "")
-    back_url = saxutils.escape(f"http://{server_ip}:6967/image?id={urllib.parse.quote(snapshot_id)}")
+    back_url = saxutils.escape(f"{http_url(server_ip, '/image', 6967)}?id={urllib.parse.quote(snapshot_id)}")
     parts = [
         "<CiscoIPPhoneText>",
         f"<Title>{title}</Title>",
@@ -513,7 +538,7 @@ def details_page(server_ip, snapshot_id, snapshot):
         "</SoftKeyItem>",
     ]
     if messageinfo_visible(live_settings, snapshot):
-        info_url = saxutils.escape(f"http://{server_ip}:6967/info?id={urllib.parse.quote(snapshot_id)}")
+        info_url = saxutils.escape(f"{http_url(server_ip, '/info', 6967)}?id={urllib.parse.quote(snapshot_id)}")
         parts.extend(
             [
                 "<SoftKeyItem>",
@@ -544,7 +569,7 @@ def text_page(server_ip, snapshot_id, snapshot):
         "</SoftKeyItem>",
     ]
     if messageinfo_visible(live_settings, snapshot):
-        info_url = saxutils.escape(f"http://{server_ip}:6967/info?id={urllib.parse.quote(snapshot_id)}&source=text")
+        info_url = saxutils.escape(f"{http_url(server_ip, '/info', 6967)}?id={urllib.parse.quote(snapshot_id)}&source=text")
         parts.extend(
             [
                 "<SoftKeyItem>",
@@ -565,8 +590,8 @@ def info_page(server_ip, snapshot_id, snapshot, source="image"):
     is_text_source = str(source or "").strip().lower() == "text"
     has_long_text = bool(str(snapshot.get("longmessage") or "").strip())
     back_target = "text" if is_text_source else "image"
-    back_url = saxutils.escape(f"http://{server_ip}:6967/{back_target}?id={urllib.parse.quote(snapshot_id)}")
-    text_url = saxutils.escape(f"http://{server_ip}:6967/details?id={urllib.parse.quote(snapshot_id)}")
+    back_url = saxutils.escape(f"{http_url(server_ip, f'/{back_target}', 6967)}?id={urllib.parse.quote(snapshot_id)}")
+    text_url = saxutils.escape(f"{http_url(server_ip, '/details', 6967)}?id={urllib.parse.quote(snapshot_id)}")
     lines = build_messageinfo_lines(live_settings, snapshot)
     debug_log(
         f"info_page snapshot={snapshot_id} source={source!r} "
