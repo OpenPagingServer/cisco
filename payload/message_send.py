@@ -1,4 +1,3 @@
-
 import os
 import json
 import ipaddress
@@ -782,14 +781,32 @@ def send_ready_signal(module_name, stream_id):
         debug_log(f"READY failed module={module_name} stream={stream_id}")
 
 
-def xml_text_message(name, text):
+def xml_text_message(name, text, audio_uri=None):
     title = saxutils.escape("" if name is None else str(name))
     body = xml_text_content(text)
+    
+    softkeys = ""
+    if audio_uri:
+        safe_audio_uri = saxutils.escape(audio_uri)
+        softkeys += (
+            "<SoftKeyItem>"
+            "<Name>Play Audio</Name>"
+            f"<URL>{safe_audio_uri}</URL>"
+            "<Position>1</Position>"
+            "</SoftKeyItem>"
+            "<SoftKeyItem>"
+            "<Name>Stop Audio</Name>"
+            "<URL>RTPRx:Stop</URL>"
+            "<Position>2</Position>"
+            "</SoftKeyItem>"
+        )
+        
     return xml_document(
         "<CiscoIPPhoneText>"
         f"<Title>{title}</Title>"
         "<Prompt>Message text</Prompt>"
         f"<Text>{body}</Text>"
+        f"{softkeys}"
         "</CiscoIPPhoneText>"
     )
 
@@ -850,13 +867,46 @@ def model_supports_visual(model_value):
     return True
 
 
-def xml_image_message(name, short_text, bg_color, symbol, image_url, resolution, model_value=None):
+def xml_image_message(name, short_text, bg_color, symbol, image_url, resolution, model_value=None, audio_uri=None):
     title = saxutils.escape("" if name is None else str(name))
     url = saxutils.escape(image_url)
     if normalize_model_number(model_value).startswith("79"):
         width, height = 0, 0
     else:
         width, height = image_width_height(resolution)
+        
+    softkeys = ""
+    position = 1
+    
+    if audio_uri:
+        safe_audio_uri = saxutils.escape(audio_uri)
+        softkeys += (
+            "<SoftKeyItem>"
+            "<Name>Play Audio</Name>"
+            f"<URL>{safe_audio_uri}</URL>"
+            f"<Position>{position}</Position>"
+            "</SoftKeyItem>"
+        )
+        position += 1
+        
+        softkeys += (
+            "<SoftKeyItem>"
+            "<Name>Stop Audio</Name>"
+            "<URL>RTPRx:Stop</URL>"
+            f"<Position>{position}</Position>"
+            "</SoftKeyItem>"
+        )
+        position += 1
+
+    # Always include the Exit softkey for images
+    softkeys += (
+        "<SoftKeyItem>"
+        "<Name>Exit</Name>"
+        f"<URL>{xml_services_exit_uri()}</URL>"
+        f"<Position>{position}</Position>"
+        "</SoftKeyItem>"
+    )
+
     return xml_document(
         "<CiscoIPPhoneImageFile>"
         f"<Title>{title}</Title>"
@@ -866,11 +916,7 @@ def xml_image_message(name, short_text, bg_color, symbol, image_url, resolution,
         "<LocationX>-1</LocationX>"
         "<LocationY>-1</LocationY>"
         f"<URL>{url}</URL>"
-        "<SoftKeyItem>"
-        "<Name>Exit</Name>"
-        f"<URL>{xml_services_exit_uri()}</URL>"
-        "<Position>1</Position>"
-        "</SoftKeyItem>"
+        f"{softkeys}"
         "</CiscoIPPhoneImageFile>"
     )
 
