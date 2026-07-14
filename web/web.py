@@ -156,6 +156,7 @@ def ensure_schema(conn_factory):
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
             )
             ensure_model_enum(cur, ENTERPRISE_TABLE)
+            ensure_varchar_column(cur, ENTERPRISE_TABLE, "ipv4", 255)
             ensure_varchar_column(cur, EXE_TABLE, "ipv4", 255)
         conn.commit()
     finally:
@@ -266,11 +267,12 @@ def render_form(form_type, request, conn_factory, page, user):
                 volume = values["volume"] if values["volume"] in VOLUMES else "asis"
                 if query_one(conn_factory, f"SELECT macaddr FROM `{ENTERPRISE_TABLE}` WHERE macaddr=%s", (macaddr,)):
                     raise ValueError("That Cisco SEP endpoint already exists.")
+                host = validate_host_or_ip(values["ipv4"])
                 status = "Unchecked" if request.form.get("unchecked") else "New"
                 execute(
                     conn_factory,
                     f"INSERT INTO `{ENTERPRISE_TABLE}` (macaddr, name, ipv4, status, audio, model, visual, volume, addedby) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'MANUAL')",
-                    (macaddr, values["name"], values["ipv4"], status, audio, values["model"], visual, volume),
+                    (macaddr, values["name"], host, status, audio, values["model"], visual, volume),
                 )
                 message = "Cisco enterprise endpoint added."
                 selected_model = ""
@@ -303,7 +305,7 @@ def render_form(form_type, request, conn_factory, page, user):
             f"{alert(message, error)}<div class='topbar'><form method='post'><button class='button secondary' type='submit' name='model' value=''>Back</button></form></div><div class='selected-model'>Selected model: {h(selected_model)}</div><form method='post' class='grid'><input type='hidden' name='model' value='{h(selected_model)}'>"
             f"<div class='row'><label>MAC Address</label><input class='control' name='macaddr' value='{h(values['macaddr'])}' placeholder='SEP001122334455' required></div>"
             f"<div class='row'><label>Name</label><input class='control' name='name' value='{h(values['name'])}'></div>"
-            f"<div class='row'><label>IPv4 Address</label><input class='control' name='ipv4' value='{h(values['ipv4'])}'></div>"
+            f"<div class='row'><label>Hostname or IP Address</label><input class='control' name='ipv4' value='{h(values['ipv4'])}' placeholder='phone.example.local, 192.0.2.10, or 2001:db8::10' required><small class='note'>DNS hostnames, IPv4 addresses, and IPv6 addresses are supported.</small></div>"
             f"<label class='check'><input type='checkbox' name='unchecked' value='1'{' checked' if values.get('unchecked') else ''}> Do not check status of device (may slow sending of broadcasts)</label>"
             f"<div class='row'><label>Audio</label><select class='control' name='audio'>{option_list(AUDIO_MODES, values['audio'])}</select>{audio_key}</div>"
             f"<div class='row'><label>Visual</label><select class='control' name='visual'>{option_list(visual_modes, values['visual'])}</select></div>"
@@ -405,7 +407,8 @@ def render_action(action, endpoint_id, request, conn_factory, page, user):
                 volume = request.form.get("volume") if request.form.get("volume") in VOLUMES else "asis"
                 if query_one(conn_factory, f"SELECT macaddr FROM `{ENTERPRISE_TABLE}` WHERE macaddr=%s AND macaddr<>%s", (mac, row["macaddr"])):
                     raise ValueError("That Cisco SEP endpoint already exists.")
-                execute(conn_factory, f"UPDATE `{ENTERPRISE_TABLE}` SET macaddr=%s, name=%s, ipv4=%s, audio=%s, model=%s, visual=%s, volume=%s WHERE macaddr=%s", (mac, request.form.get("name", ""), request.form.get("ipv4", ""), audio, model, visual, volume, row["macaddr"]))
+                host = validate_host_or_ip(request.form.get("ipv4"))
+                execute(conn_factory, f"UPDATE `{ENTERPRISE_TABLE}` SET macaddr=%s, name=%s, ipv4=%s, audio=%s, model=%s, visual=%s, volume=%s WHERE macaddr=%s", (mac, request.form.get("name", ""), host, audio, model, visual, volume, row["macaddr"]))
             return page("Endpoint Saved", module_body("<script>window.top.location.href='/admin/manage-endpoints'</script><div class='success'>Cisco endpoint updated.</div>"), "endpoints", user)
     except Exception as exc:
         error = str(exc)
@@ -428,7 +431,7 @@ def render_action(action, endpoint_id, request, conn_factory, page, user):
             f"<input type='hidden' name='_lookup_macaddr' value='{h(row.get('macaddr'))}'>"
             f"<div class='row'><label>MAC Address</label><input class='control' name='macaddr' value='{h(row.get('macaddr'))}' required></div>"
             f"<div class='row'><label>Name</label><input class='control' name='name' value='{h(row.get('name'))}'></div>"
-            f"<div class='row'><label>IPv4 Address</label><input class='control' name='ipv4' value='{h(row.get('ipv4'))}'></div>"
+            f"<div class='row'><label>Hostname or IP Address</label><input class='control' name='ipv4' value='{h(row.get('ipv4'))}' placeholder='phone.example.local, 192.0.2.10, or 2001:db8::10' required><small class='note'>DNS hostnames, IPv4 addresses, and IPv6 addresses are supported.</small></div>"
             f"<div class='row'><label>Model</label><select class='control' name='model'>{option_list(MODELS, row.get('model'))}</select></div>"
             f"<div class='row'><label>Audio</label><select class='control' name='audio'>{option_list(AUDIO_MODES, row.get('audio'))}</select></div>"
             f"<div class='row'><label>Visual</label><select class='control' name='visual'>{option_list(visual_modes, row.get('visual'))}</select></div>"
