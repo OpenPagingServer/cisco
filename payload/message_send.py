@@ -1,4 +1,3 @@
-
 import os
 import json
 import ipaddress
@@ -50,7 +49,7 @@ WATCHDOG_INTERVAL = 0.1
 PRE_AUDIO_GRACE_SECONDS = 6.0
 SPA_XML_EXE_AUDIO_DELAY = 0.5
 MODULE_SETTINGS_TABLE = "endpoints-modulesettings-cisco"
-SOURCE_QUEUE_MAX_FRAMES = 24
+SOURCE_QUEUE_MAX_FRAMES = 80
 LIVE_PAGE_SOURCE_KIND = "livepage"
 LIVE_PAGE_MIX_WEIGHT = 5.0
 LIVE_PAGE_BACKGROUND_WEIGHT = 0.35
@@ -59,9 +58,11 @@ LIVE_PAGE_OVERLAP_BOOST = 1.25
 DEFAULT_IMAGE_RESOLUTION = "298x168"
 MODEL_EXACT_IMAGE_RESOLUTIONS = {
     "8845": "600x300",
+    "8875": "800x480",
     "8961": "600x300",
-    "9861": "600x280",
-    "9871": "600x280",
+    "9851": "800x480",
+    "9861": "800x480",
+    "9871": "960x360",
     "9951": "600x300",
     "9971": "600x300",
 }
@@ -69,10 +70,11 @@ MODEL_PREFIX_IMAGE_RESOLUTIONS = {
     "88": "600x300",
 }
 LEGACY_MONO_IMAGE_MODELS = {"7940", "7941", "7942", "7960", "7961", "7962"}
-TEXT_ONLY_VISUAL_MODELS = {"7811", "7821", "7841", "7861", "8831", "9811", "9841", "9851"}
+TEXT_ONLY_VISUAL_MODELS = {"7811", "7821", "7841", "7861", "8831", "9811", "9841"}
 
 rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-rtp_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+rtp_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 32)
+rtp_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
 rtp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 262144)
 try:
     rtp_sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0xB8)
@@ -853,18 +855,23 @@ def model_supports_visual(model_value):
 def xml_image_message(name, short_text, bg_color, symbol, image_url, resolution, model_value=None):
     title = saxutils.escape("" if name is None else str(name))
     url = saxutils.escape(image_url)
-    if normalize_model_number(model_value).startswith("79"):
+    model = normalize_model_number(model_value)
+    if model.startswith("79"):
         width, height = 0, 0
     else:
         width, height = image_width_height(resolution)
+    if model in {"8875", "9851", "9861", "9871"}:
+        location_x, location_y = 0, 0
+    else:
+        location_x, location_y = -1, -1
     return xml_document(
         "<CiscoIPPhoneImageFile>"
         f"<Title>{title}</Title>"
         "<Prompt>Select an action</Prompt>"
         f"<Width>{width}</Width>"
         f"<Height>{height}</Height>"
-        "<LocationX>-1</LocationX>"
-        "<LocationY>-1</LocationY>"
+        f"<LocationX>{location_x}</LocationX>"
+        f"<LocationY>{location_y}</LocationY>"
         f"<URL>{url}</URL>"
         "<SoftKeyItem>"
         "<Name>Exit</Name>"
@@ -1415,7 +1422,10 @@ def multicast_mixer_loop(session_id):
                 return
             sources = set(session.get("sources") or set())
             phones = set(session.get("phones") or set())
-            if not sources or not phones:
+            queues_by_source = session.setdefault("frames", {})
+            weights_by_source = session.setdefault("source_weights", {})
+            has_remaining = any(q for q in queues_by_source.values())
+            if not phones or (not sources and not has_remaining):
                 multicast_sessions.pop(session_id, None)
                 stop_phones = [
                     ip for ip in phones
@@ -1431,14 +1441,15 @@ def multicast_mixer_loop(session_id):
                         daemon=True,
                     ).start()
                 return
-            queues_by_source = session.setdefault("frames", {})
-            weights_by_source = session.setdefault("source_weights", {})
             frames = []
-            for source in sorted(sources):
+            for source in list(queues_by_source.keys()):
                 queue = queues_by_source.get(source)
                 if queue:
                     frame = queue.popleft()
                     frames.append((frame, weights_by_source.get(source, 1.0)))
+                elif source not in sources:
+                    queues_by_source.pop(source, None)
+                    weights_by_source.pop(source, None)
             if not frames:
                 frames = [(SILENCE_FRAME, 1.0)]
             seq = session["seq"]
@@ -1540,8 +1551,6 @@ def remove_multicast_sources(stream_id, session_ids):
             if session is None:
                 continue
             session.setdefault("sources", set()).discard(stream_id)
-            session.setdefault("frames", {}).pop(stream_id, None)
-            session.setdefault("source_weights", {}).pop(stream_id, None)
             debug_log(
                 f"multicast_mux remove_source session={session_id} stream={stream_id} "
                 f"remaining_sources={sorted(session.get('sources', set()))}"
@@ -1572,6 +1581,9 @@ def count_multicast_source_phones(stream_id):
         return total
 
 
+MULTICAST_SETTLE_SECONDS = 0.25
+
+
 def start_multicast_phone_sessions(phone_ips, stream_id, context_label, source_kind=None):
     start_groups = add_multicast_sources(phone_ips, stream_id, source_kind)
     for session, ips in start_groups:
@@ -1590,6 +1602,8 @@ def start_multicast_phone_sessions(phone_ips, stream_id, context_label, source_k
                     f"{context_label} removed failed multicast start ip={ip} "
                     f"status={start_results[ip].get('status')} device_status_unchanged=true"
                 )
+    if start_groups:
+        time.sleep(MULTICAST_SETTLE_SECONDS)
     return count_multicast_source_phones(stream_id)
 
 
@@ -1601,20 +1615,24 @@ def unicast_mixer_loop(phone_ip):
             if not session:
                 return
             sources = set(session.get("sources") or set())
-            if not sources:
+            queues_by_source = session.setdefault("frames", {})
+            weights_by_source = session.setdefault("source_weights", {})
+            has_remaining = any(q for q in queues_by_source.values())
+            if not sources and not has_remaining:
                 unicast_sessions.pop(phone_ip, None)
                 stop_xml = xml_stop_unicast()
                 threading.Thread(target=send_phone_request, args=(phone_ip, stop_xml), daemon=True).start()
                 debug_log(f"unicast_mixer stop phone={phone_ip}")
                 return
-            queues_by_source = session.setdefault("frames", {})
-            weights_by_source = session.setdefault("source_weights", {})
             frames = []
-            for source in sorted(sources):
+            for source in list(queues_by_source.keys()):
                 queue = queues_by_source.get(source)
                 if queue:
                     frame = queue.popleft()
                     frames.append((frame, weights_by_source.get(source, 1.0)))
+                elif source not in sources:
+                    queues_by_source.pop(source, None)
+                    weights_by_source.pop(source, None)
             if not frames:
                 frames = [(SILENCE_FRAME, 1.0)]
             seq = session["seq"]
@@ -1695,8 +1713,6 @@ def remove_unicast_sources(stream_id, phone_ips):
             if session is None:
                 continue
             session.setdefault("sources", set()).discard(stream_id)
-            session.setdefault("frames", {}).pop(stream_id, None)
-            session.setdefault("source_weights", {}).pop(stream_id, None)
 
 
 def build_rtp_destinations(stream, spa_multicast_targets):

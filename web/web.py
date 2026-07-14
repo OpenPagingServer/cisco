@@ -309,10 +309,10 @@ def render_form(form_type, request, conn_factory, page, user):
         audio_key = "<div class='audio-key'><div><strong>Multicast:</strong> Sends a single RTP stream for all phones receiving a page. Uses less server resources, less delay. Requires multicast compatible network infrastructure. High amount of packet loss on weak WLAN. Does not usually transmit over NAT/WAN & VPN tunnels. Enable IGMP on your network switch(es) for the best results.</div><div><strong>Unicast:</strong> Sends RTP streams directly to the phone. Works better over WAN, VPN, and WLAN. Uses more server resources, may cause noticeable delay between speakers. Use Unicast only if Multicast cannot be used on your network.</div><div><strong>Disabled:</strong> Audio will not be sent to this telephone.</div></div>"
         body = (
             f"{alert(message, error)}<div class='topbar'><form method='post'><button class='button secondary' type='submit' name='model' value=''>Back</button></form></div><div class='selected-model'>Selected model: {h(selected_model)}</div><form method='post' class='grid'><input type='hidden' name='model' value='{h(selected_model)}'>"
-            f"<div class='row'><label>MAC Address</label><input class='control' id='enterpriseMacAddress' name='macaddr' value='{h(values['macaddr'])}' placeholder='SEP001122334455' maxlength='15' pattern='SEP[A-F0-9]{{12}}' autocomplete='off' spellcheck='false' required><small class='note'>Enter 12 hexadecimal digits. Colons and dashes are removed automatically, letters are converted to uppercase, and SEP is added automatically.</small></div>"
+            f"<div class='row'><label>MAC Address</label><input class='control' id='enterpriseMacAddress' name='macaddr' value='{h(values['macaddr'])}' placeholder='SEP001122334455' maxlength='15' pattern='SEP[A-F0-9]{{12}}' autocomplete='off' spellcheck='false' required></div>"
             f"<div class='row'><label>Name</label><input class='control' name='name' value='{h(values['name'])}'></div>"
-            f"<div class='row'><label>Hostname or IP Address</label><input class='control' name='ipv4' value='{h(values['ipv4'])}' placeholder='phone.example.local, 192.0.2.10, or 2001:db8::10' required><small class='note'>DNS hostnames, IPv4 addresses, and IPv6 addresses are supported.</small></div>"
-            f"<label class='check'><input type='checkbox' name='unchecked' value='1'{' checked' if values.get('unchecked') else ''}> Do not check status of device (may slow sending of broadcasts)</label>"
+            f"<div class='row'><label>Hostname or IP Address</label><input class='control' name='ipv4' value='{h(values['ipv4'])}' placeholder='phone.example.local, 192.0.2.10, or 2001:db8::10' required></div>"
+            f"<label class='check'><input type='checkbox' name='unchecked' value='1'{' checked' if values.get('unchecked') else ''}> Disable status checking (Not recommended, may slow sending of broadcasts)</label>"
             f"<div class='row'><label>Audio</label><select class='control' name='audio'>{option_list(AUDIO_MODES, values['audio'])}</select>{audio_key}</div>"
             f"<div class='row'><label>Visual</label><select class='control' name='visual'>{option_list(visual_modes, values['visual'])}</select></div>"
             f"<div class='row'><label>Volume</label><select class='control' name='volume'>{option_list(VOLUMES, values['volume'])}</select></div>"
@@ -321,11 +321,12 @@ def render_form(form_type, request, conn_factory, page, user):
             "const enterpriseMacAddress=document.getElementById('enterpriseMacAddress');"
             "if(enterpriseMacAddress){"
             "const normalizeEnterpriseMac=()=>{"
-            "let value=enterpriseMacAddress.value.toUpperCase();"
-            "let hasSep=value.replace(/[^A-Z0-9]/g,'').startsWith('SEP');"
-            "let digits=hasSep?value.replace(/[^A-Z0-9]/g,'').slice(3):value;"
-            "digits=digits.replace(/[^A-F0-9]/g,'').slice(0,12);"
-            "enterpriseMacAddress.value=(digits.length||hasSep?'SEP':'')+digits;"
+            "let raw=enterpriseMacAddress.value.toUpperCase().replace(/[^A-Z0-9]/g,'');"
+            "let sep='',digits='';"
+            "if(raw.startsWith('SEP')){sep='SEP';digits=raw.slice(3).replace(/[^A-F0-9]/g,'').slice(0,12);}"
+            "else if(raw.length<=3&&'SEP'.startsWith(raw)&&raw.length>0){sep=raw;digits='';}"
+            "else{digits=raw.replace(/[^A-F0-9]/g,'').slice(0,12);if(digits.length===12)sep='SEP';}"
+            "enterpriseMacAddress.value=sep+digits;"
             "};"
             "enterpriseMacAddress.addEventListener('input',normalizeEnterpriseMac);"
             "enterpriseMacAddress.addEventListener('blur',normalizeEnterpriseMac);"
@@ -349,7 +350,7 @@ def render_form(form_type, request, conn_factory, page, user):
             f"<div class='row'><label>Hostname or IP</label><input class='control' name='ipv4' value='{h(values['ipv4'])}' placeholder='phone.example.local or 2001:db8::10' required></div>"
             f"<div class='row'><label>Username</label><input class='control' name='username' value='{h(values['username'])}'></div>"
             f"<div class='row'><label>Password</label><input class='control' type='password' name='password' value='{h(values['password'])}'></div>"
-            "<label class='check'><input type='checkbox' name='unchecked' value='1'> Do not check status</label><button class='button' type='submit'>Add Cisco SPA EXE Endpoint</button></form>"
+            "<label class='check'><input type='checkbox' name='unchecked' value='1'> Disable status checking (Not recommended, may slow sending of broadcasts)</label><button class='button' type='submit'>Add Cisco SPA EXE Endpoint</button></form>"
         )
     return page(forms()[form_type]["label"], module_body(body), "endpoints", user)
 
@@ -427,7 +428,8 @@ def render_action(action, endpoint_id, request, conn_factory, page, user):
                 if query_one(conn_factory, f"SELECT macaddr FROM `{ENTERPRISE_TABLE}` WHERE macaddr=%s AND macaddr<>%s", (mac, row["macaddr"])):
                     raise ValueError("That Cisco SEP endpoint already exists.")
                 host = validate_host_or_ip(request.form.get("ipv4"))
-                execute(conn_factory, f"UPDATE `{ENTERPRISE_TABLE}` SET macaddr=%s, name=%s, ipv4=%s, audio=%s, model=%s, visual=%s, volume=%s WHERE macaddr=%s", (mac, request.form.get("name", ""), host, audio, model, visual, volume, row["macaddr"]))
+                new_status = "Unchecked" if request.form.get("unchecked") else ("Online" if row.get("status") == "Unchecked" else row.get("status", "New"))
+                execute(conn_factory, f"UPDATE `{ENTERPRISE_TABLE}` SET macaddr=%s, name=%s, ipv4=%s, audio=%s, model=%s, visual=%s, volume=%s, status=%s WHERE macaddr=%s", (mac, request.form.get("name", ""), host, audio, model, visual, volume, new_status, row["macaddr"]))
             return page("Endpoint Saved", module_body("<script>window.top.location.href='/admin/manage-endpoints'</script><div class='success'>Cisco endpoint updated.</div>"), "endpoints", user)
     except Exception as exc:
         error = str(exc)
@@ -448,23 +450,25 @@ def render_action(action, endpoint_id, request, conn_factory, page, user):
         body = (
             f"{alert(message, error)}<p class='meta'>Current status: {h(row.get('status'))}</p><form method='post' class='grid'>"
             f"<input type='hidden' name='_lookup_macaddr' value='{h(row.get('macaddr'))}'>"
-            f"<div class='row'><label>MAC Address</label><input class='control' id='enterpriseMacAddress' name='macaddr' value='{h(row.get('macaddr'))}' maxlength='15' pattern='SEP[A-F0-9]{{12}}' autocomplete='off' spellcheck='false' required><small class='note'>Enter 12 hexadecimal digits. Colons and dashes are removed automatically, letters are converted to uppercase, and SEP is added automatically.</small></div>"
+            f"<div class='row'><label>MAC Address</label><input class='control' id='enterpriseMacAddress' name='macaddr' value='{h(row.get('macaddr'))}' maxlength='15' pattern='SEP[A-F0-9]{{12}}' autocomplete='off' spellcheck='false' required></div>"
             f"<div class='row'><label>Name</label><input class='control' name='name' value='{h(row.get('name'))}'></div>"
-            f"<div class='row'><label>Hostname or IP Address</label><input class='control' name='ipv4' value='{h(row.get('ipv4'))}' placeholder='phone.example.local, 192.0.2.10, or 2001:db8::10' required><small class='note'>DNS hostnames, IPv4 addresses, and IPv6 addresses are supported.</small></div>"
+            f"<div class='row'><label>Hostname or IP Address</label><input class='control' name='ipv4' value='{h(row.get('ipv4'))}' placeholder='phone.example.local, 192.0.2.10, or 2001:db8::10' required></div>"
             f"<div class='row'><label>Model</label><select class='control' name='model'>{option_list(MODELS, row.get('model'))}</select></div>"
             f"<div class='row'><label>Audio</label><select class='control' name='audio'>{option_list(AUDIO_MODES, row.get('audio'))}</select></div>"
             f"<div class='row'><label>Visual</label><select class='control' name='visual'>{option_list(visual_modes, row.get('visual'))}</select></div>"
             f"<div class='row'><label>Volume</label><select class='control' name='volume'>{option_list(VOLUMES, row.get('volume'))}</select></div>"
+            f"<label class='check'><input type='checkbox' name='unchecked' value='1'{' checked' if row.get('status') == 'Unchecked' else ''}> Disable status checking (Not recommended, may slow sending of broadcasts)</label>"
             "<button class='button'>Save Cisco Enterprise Endpoint</button></form>"
             "<script>"
             "const enterpriseMacAddress=document.getElementById('enterpriseMacAddress');"
             "if(enterpriseMacAddress){"
             "const normalizeEnterpriseMac=()=>{"
-            "let value=enterpriseMacAddress.value.toUpperCase();"
-            "let hasSep=value.replace(/[^A-Z0-9]/g,'').startsWith('SEP');"
-            "let digits=hasSep?value.replace(/[^A-Z0-9]/g,'').slice(3):value;"
-            "digits=digits.replace(/[^A-F0-9]/g,'').slice(0,12);"
-            "enterpriseMacAddress.value=(digits.length||hasSep?'SEP':'')+digits;"
+            "let raw=enterpriseMacAddress.value.toUpperCase().replace(/[^A-Z0-9]/g,'');"
+            "let sep='',digits='';"
+            "if(raw.startsWith('SEP')){sep='SEP';digits=raw.slice(3).replace(/[^A-F0-9]/g,'').slice(0,12);}"
+            "else if(raw.length<=3&&'SEP'.startsWith(raw)&&raw.length>0){sep=raw;digits='';}"
+            "else{digits=raw.replace(/[^A-F0-9]/g,'').slice(0,12);if(digits.length===12)sep='SEP';}"
+            "enterpriseMacAddress.value=sep+digits;"
             "};"
             "enterpriseMacAddress.addEventListener('input',normalizeEnterpriseMac);"
             "enterpriseMacAddress.addEventListener('blur',normalizeEnterpriseMac);"

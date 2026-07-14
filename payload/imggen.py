@@ -434,10 +434,12 @@ def render_thumbnail(
     start_size: Optional[int],
     symbol_name: Optional[str],
     symbol_resolution: Optional[str],
+    safe_bottom: int,
 ) -> Image.Image:
     scale = 4
     work_w = width * scale
     work_h = height * scale
+    content_h = max(1, work_h - (safe_bottom * scale))
 
     image = Image.new("RGBA", (work_w, work_h), bg_rgb + (255,))
     draw = ImageDraw.Draw(image)
@@ -451,14 +453,14 @@ def render_thumbnail(
             if bbox:
                 symbol_img = symbol_img.crop(bbox)
 
-    pad = max(16, int(min(work_w, work_h) * 0.08))
-    gap = max(12, int(min(work_w, work_h) * 0.05))
+    pad = max(16, int(min(work_w, content_h) * 0.08))
+    gap = max(12, int(min(work_w, content_h) * 0.05))
     longest_word = max((len(word) for word in re.split(r"\s+", text or "") if word), default=0)
     if len(text or "") > 80 or longest_word > 18:
         pad = max(12, int(pad * 0.75))
         gap = max(8, int(gap * 0.7))
 
-    layout = choose_best_layout(work_w, work_h, pad, gap, text, font_path, start_size, symbol_img, symbol_resolution, draw)
+    layout = choose_best_layout(work_w, content_h, pad, gap, text, font_path, start_size, symbol_img, symbol_resolution, draw)
 
     direction = layout["dir"]
     sym_img = layout["sym_img"]
@@ -473,7 +475,7 @@ def render_thumbnail(
         return image.resize((width, height), RESAMPLE).convert("RGB")
 
     if not sym_img:
-        start_y = (work_h - th) // 2
+        start_y = (content_h - th) // 2
         curr_y = start_y
         for line, (w, h, left, top) in zip(lines, metrics):
             start_x = (work_w - w) // 2
@@ -483,7 +485,7 @@ def render_thumbnail(
 
     elif not text:
         start_x = (work_w - sw) // 2
-        start_y = (work_h - sh) // 2
+        start_y = (content_h - sh) // 2
         image.paste(sym_img, (start_x, start_y), sym_img)
 
     else:
@@ -492,7 +494,7 @@ def render_thumbnail(
             total_h = max(sh, th)
 
             start_x = (work_w - total_w) // 2
-            start_y = (work_h - total_h) // 2
+            start_y = (content_h - total_h) // 2
 
             sym_y = start_y + (total_h - sh) // 2
             image.paste(sym_img, (start_x, sym_y), sym_img)
@@ -510,7 +512,7 @@ def render_thumbnail(
             total_h = sh + gap + th
 
             start_x = (work_w - total_w) // 2
-            start_y = (work_h - total_h) // 2
+            start_y = (content_h - total_h) // 2
 
             sym_x = start_x + (total_w - sw) // 2
             image.paste(sym_img, (sym_x, start_y), sym_img)
@@ -561,6 +563,7 @@ def cache_key_for_request(
     mono: bool,
     dpi: int,
     bit_depth: Optional[int],
+    safe_bottom: int,
     font_path: Optional[str],
     symbol_path: Optional[Path],
 ) -> tuple:
@@ -579,6 +582,7 @@ def cache_key_for_request(
         mono,
         dpi,
         bit_depth,
+        safe_bottom,
         font_info,
         symbol_info,
     )
@@ -643,6 +647,15 @@ def thumb():
         bit_depth = int(bit_depth_param) if bit_depth_param is not None and bit_depth_param != "" else None
         if bit_depth is not None and bit_depth not in (1, 4, 24):
             raise ValueError("Invalid bit depth. Use 1, 4, or 24.")
+        safe_bottom_param = request.args.get("safebottom") or request.args.get("safe_bottom")
+        if safe_bottom_param is not None and safe_bottom_param != "":
+            safe_bottom = int(safe_bottom_param)
+        elif width == 600 and height == 280:
+            safe_bottom = 30
+        else:
+            safe_bottom = 0
+        if safe_bottom < 0 or safe_bottom >= height:
+            raise ValueError("Safe bottom must be at least 0 and less than the image height.")
 
         font_path = resolve_font_path(font_query)
         if not font_path:
@@ -674,6 +687,7 @@ def thumb():
             mono,
             dpi,
             bit_depth,
+            safe_bottom,
             font_path,
             symbol_path,
         )
@@ -689,6 +703,7 @@ def thumb():
                 start_size,
                 symbol_name,
                 symbol_resolution,
+                safe_bottom,
             )
             return save_png_bytes(image, mono, dpi, bit_depth)
 
