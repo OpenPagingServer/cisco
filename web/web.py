@@ -44,6 +44,16 @@ def normalize_device_id(value):
     return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
 
 
+def normalize_macaddr(value):
+    cleaned = re.sub(r"[^A-Fa-f0-9]", "", str(value or "")).upper()
+    raw = re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
+    if raw.startswith("SEP"):
+        cleaned = re.sub(r"[^A-Fa-f0-9]", "", raw[3:]).upper()
+    if len(cleaned) != 12:
+        raise ValueError("Enter a valid 12-digit hexadecimal MAC address.")
+    return "SEP" + cleaned
+
+
 def normalize_host_or_ip(value):
     host = str(value or "").strip()
     if host.startswith("[") and host.endswith("]"):
@@ -254,11 +264,7 @@ def render_form(form_type, request, conn_factory, page, user):
             for key in values:
                 values[key] = str(request.form.get(key, values[key]) or "").strip()
             if form_type == "enterprise" and request.form.get("macaddr"):
-                macaddr = normalize_device_id(values["macaddr"])
-                if macaddr and not macaddr.startswith("SEP"):
-                    macaddr = "SEP" + macaddr
-                if not macaddr:
-                    raise ValueError("MAC/SEP identifier is required.")
+                macaddr = normalize_macaddr(values["macaddr"])
                 if values["model"] not in MODELS:
                     raise ValueError("Phone model is required.")
                 visual_modes = active_visual_modes(values["model"])
@@ -303,7 +309,7 @@ def render_form(form_type, request, conn_factory, page, user):
         audio_key = "<div class='audio-key'><div><strong>Multicast:</strong> Sends a single RTP stream for all phones receiving a page. Uses less server resources, less delay. Requires multicast compatible network infrastructure. High amount of packet loss on weak WLAN. Does not usually transmit over NAT/WAN & VPN tunnels. Enable IGMP on your network switch(es) for the best results.</div><div><strong>Unicast:</strong> Sends RTP streams directly to the phone. Works better over WAN, VPN, and WLAN. Uses more server resources, may cause noticeable delay between speakers. Use Unicast only if Multicast cannot be used on your network.</div><div><strong>Disabled:</strong> Audio will not be sent to this telephone.</div></div>"
         body = (
             f"{alert(message, error)}<div class='topbar'><form method='post'><button class='button secondary' type='submit' name='model' value=''>Back</button></form></div><div class='selected-model'>Selected model: {h(selected_model)}</div><form method='post' class='grid'><input type='hidden' name='model' value='{h(selected_model)}'>"
-            f"<div class='row'><label>MAC Address</label><input class='control' name='macaddr' value='{h(values['macaddr'])}' placeholder='SEP001122334455' required></div>"
+            f"<div class='row'><label>MAC Address</label><input class='control' id='enterpriseMacAddress' name='macaddr' value='{h(values['macaddr'])}' placeholder='SEP001122334455' maxlength='15' pattern='SEP[A-F0-9]{{12}}' autocomplete='off' spellcheck='false' required><small class='note'>Enter 12 hexadecimal digits. Colons and dashes are removed automatically, letters are converted to uppercase, and SEP is added automatically.</small></div>"
             f"<div class='row'><label>Name</label><input class='control' name='name' value='{h(values['name'])}'></div>"
             f"<div class='row'><label>Hostname or IP Address</label><input class='control' name='ipv4' value='{h(values['ipv4'])}' placeholder='phone.example.local, 192.0.2.10, or 2001:db8::10' required><small class='note'>DNS hostnames, IPv4 addresses, and IPv6 addresses are supported.</small></div>"
             f"<label class='check'><input type='checkbox' name='unchecked' value='1'{' checked' if values.get('unchecked') else ''}> Do not check status of device (may slow sending of broadcasts)</label>"
@@ -311,6 +317,21 @@ def render_form(form_type, request, conn_factory, page, user):
             f"<div class='row'><label>Visual</label><select class='control' name='visual'>{option_list(visual_modes, values['visual'])}</select></div>"
             f"<div class='row'><label>Volume</label><select class='control' name='volume'>{option_list(VOLUMES, values['volume'])}</select></div>"
             "<button class='button' type='submit'>Add Cisco Enterprise Endpoint</button></form>"
+            "<script>"
+            "const enterpriseMacAddress=document.getElementById('enterpriseMacAddress');"
+            "if(enterpriseMacAddress){"
+            "const normalizeEnterpriseMac=()=>{"
+            "let value=enterpriseMacAddress.value.toUpperCase();"
+            "let hasSep=value.replace(/[^A-Z0-9]/g,'').startsWith('SEP');"
+            "let digits=hasSep?value.replace(/[^A-Z0-9]/g,'').slice(3):value;"
+            "digits=digits.replace(/[^A-F0-9]/g,'').slice(0,12);"
+            "enterpriseMacAddress.value=(digits.length||hasSep?'SEP':'')+digits;"
+            "};"
+            "enterpriseMacAddress.addEventListener('input',normalizeEnterpriseMac);"
+            "enterpriseMacAddress.addEventListener('blur',normalizeEnterpriseMac);"
+            "normalizeEnterpriseMac();"
+            "}"
+            "</script>"
         )
     elif form_type == "spa-multicast":
         body = (
@@ -395,9 +416,7 @@ def render_action(action, endpoint_id, request, conn_factory, page, user):
                     raise ValueError("That SPA EXE label already exists.")
                 execute(conn_factory, f"UPDATE `{EXE_TABLE}` SET ipv4=%s, username=%s, password=%s, macaddress=%s WHERE id=%s", (host, request.form.get("username", ""), request.form.get("password", ""), label, row["id"]))
             else:
-                mac = normalize_device_id(request.form.get("macaddr"))
-                if mac and not mac.startswith("SEP"):
-                    mac = "SEP" + mac
+                mac = normalize_macaddr(request.form.get("macaddr"))
                 model = request.form.get("model", "")
                 if model not in MODELS:
                     raise ValueError("Phone model is required.")
@@ -429,7 +448,7 @@ def render_action(action, endpoint_id, request, conn_factory, page, user):
         body = (
             f"{alert(message, error)}<p class='meta'>Current status: {h(row.get('status'))}</p><form method='post' class='grid'>"
             f"<input type='hidden' name='_lookup_macaddr' value='{h(row.get('macaddr'))}'>"
-            f"<div class='row'><label>MAC Address</label><input class='control' name='macaddr' value='{h(row.get('macaddr'))}' required></div>"
+            f"<div class='row'><label>MAC Address</label><input class='control' id='enterpriseMacAddress' name='macaddr' value='{h(row.get('macaddr'))}' maxlength='15' pattern='SEP[A-F0-9]{{12}}' autocomplete='off' spellcheck='false' required><small class='note'>Enter 12 hexadecimal digits. Colons and dashes are removed automatically, letters are converted to uppercase, and SEP is added automatically.</small></div>"
             f"<div class='row'><label>Name</label><input class='control' name='name' value='{h(row.get('name'))}'></div>"
             f"<div class='row'><label>Hostname or IP Address</label><input class='control' name='ipv4' value='{h(row.get('ipv4'))}' placeholder='phone.example.local, 192.0.2.10, or 2001:db8::10' required><small class='note'>DNS hostnames, IPv4 addresses, and IPv6 addresses are supported.</small></div>"
             f"<div class='row'><label>Model</label><select class='control' name='model'>{option_list(MODELS, row.get('model'))}</select></div>"
@@ -437,6 +456,21 @@ def render_action(action, endpoint_id, request, conn_factory, page, user):
             f"<div class='row'><label>Visual</label><select class='control' name='visual'>{option_list(visual_modes, row.get('visual'))}</select></div>"
             f"<div class='row'><label>Volume</label><select class='control' name='volume'>{option_list(VOLUMES, row.get('volume'))}</select></div>"
             "<button class='button'>Save Cisco Enterprise Endpoint</button></form>"
+            "<script>"
+            "const enterpriseMacAddress=document.getElementById('enterpriseMacAddress');"
+            "if(enterpriseMacAddress){"
+            "const normalizeEnterpriseMac=()=>{"
+            "let value=enterpriseMacAddress.value.toUpperCase();"
+            "let hasSep=value.replace(/[^A-Z0-9]/g,'').startsWith('SEP');"
+            "let digits=hasSep?value.replace(/[^A-Z0-9]/g,'').slice(3):value;"
+            "digits=digits.replace(/[^A-F0-9]/g,'').slice(0,12);"
+            "enterpriseMacAddress.value=(digits.length||hasSep?'SEP':'')+digits;"
+            "};"
+            "enterpriseMacAddress.addEventListener('input',normalizeEnterpriseMac);"
+            "enterpriseMacAddress.addEventListener('blur',normalizeEnterpriseMac);"
+            "normalizeEnterpriseMac();"
+            "}"
+            "</script>"
         )
     return page("Edit Cisco Endpoint", module_body(body), "endpoints", user)
 
