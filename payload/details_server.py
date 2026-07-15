@@ -468,8 +468,9 @@ def hydrate_snapshot_message_fields(snapshot):
 
 
 def thumb_source_url(server_ip, snapshot):
+    resolution = snapshot.get("resolution") or "600x300"
     params = {
-        "resolution": "600x300",
+        "resolution": resolution,
         "bg": snapshot.get("color") or "FFFFFF",
         "text": snapshot.get("shortmessage") or "",
     }
@@ -491,10 +492,14 @@ def image_page(server_ip, snapshot_id, snapshot):
     has_text = bool((snapshot.get("longmessage") or "").strip())
     has_info = messageinfo_visible(live_settings, snapshot)
     has_details = has_text or has_info
+    model = snapshot.get("model") or ""
     parts = [
         "<CiscoIPPhoneImageFile>",
         f"<Title>{title}</Title>",
-        "<Prompt>Select an action</Prompt>",
+    ]
+    if model not in ("9811", "9851", "9861", "9871"):
+        parts.append("<Prompt>Select an action</Prompt>")
+    parts.extend([
         "<LocationX>-1</LocationX>",
         "<LocationY>-1</LocationY>",
         f"<URL>{image}</URL>",
@@ -503,7 +508,7 @@ def image_page(server_ip, snapshot_id, snapshot):
         f"<URL>{xml_services_exit_uri()}</URL>",
         "<Position>1</Position>",
         "</SoftKeyItem>",
-    ]
+    ])
     if has_details:
         detail_path = "details" if has_text else "info"
         detail_url = saxutils.escape(f"{http_url(server_ip, f'/{detail_path}', 6967)}?id={urllib.parse.quote(snapshot_id)}")

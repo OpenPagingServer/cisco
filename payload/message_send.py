@@ -860,14 +860,18 @@ def xml_image_message(name, short_text, bg_color, symbol, image_url, resolution,
         width, height = 0, 0
     else:
         width, height = image_width_height(resolution)
-    if model in {"8875", "9851", "9861", "9871"}:
+    if model in {"8875", "9871"}:
         location_x, location_y = 0, 0
     else:
         location_x, location_y = -1, -1
+    if model in {"9811", "9851", "9861", "9871"}:
+        prompt_tag = ""
+    else:
+        prompt_tag = "<Prompt>Select an action</Prompt>"
     return xml_document(
         "<CiscoIPPhoneImageFile>"
         f"<Title>{title}</Title>"
-        "<Prompt>Select an action</Prompt>"
+        f"{prompt_tag}"
         f"<Width>{width}</Width>"
         f"<Height>{height}</Height>"
         f"<LocationX>{location_x}</LocationX>"
@@ -897,6 +901,9 @@ def build_image_url(phone_ip, short_text, bg_color, symbol, model_value=None):
         params["bitdepth"] = "24"
     if symbol:
         params["symbol"] = str(symbol)
+    model = normalize_model_number(model_value)
+    if model.startswith("98"):
+        params["fontscale"] = "90"
     return f"{http_url(base_ip, '/thumb', 6975)}?{urllib.parse.urlencode(params)}"
 
 
@@ -923,7 +930,7 @@ def xml_services_exit_uri():
     return "Init:Services"
 
 
-def persist_details_snapshot(phone_ip, message, settings=None, message_id=None):
+def persist_details_snapshot(phone_ip, message, settings=None, message_id=None, model=None):
     DETAILS_STORE_DIR.mkdir(parents=True, exist_ok=True)
     snapshot_id = uuid.uuid4().hex
     cisco_settings = settings or {}
@@ -946,6 +953,8 @@ def persist_details_snapshot(phone_ip, message, settings=None, message_id=None):
         "messageinfo-showsender": bool(cisco_settings.get("messageinfo-showsender")),
         "messageinfo-productname": bool(cisco_settings.get("messageinfo-productname")),
         "product-name": cisco_settings.get("product-name", "") or "",
+        "model": str(model or ""),
+        "resolution": image_resolution_for_model(model) if model else "",
     }
     debug_log(
         f"persist_details_snapshot snapshot={snapshot_id} broadcast_id={payload['broadcast_id']} "
@@ -983,7 +992,7 @@ def build_visual_payloads(endpoint, message, cisco_settings=None, message_id=Non
         image_url = build_image_url(ip, short_text, color, symbol, model)
         payloads = []
         if str(longmessage or "").strip() or messageinfo_enabled:
-            snapshot_id = persist_details_snapshot(ip, message, cisco_settings, message_id=message_id)
+            snapshot_id = persist_details_snapshot(ip, message, cisco_settings, message_id=message_id, model=model)
             payloads.append(
                 (
                     "image_details",
@@ -1001,7 +1010,7 @@ def build_visual_payloads(endpoint, message, cisco_settings=None, message_id=Non
     if visual_mode == "image":
         debug_log(f"build_visual_payloads endpoint={endpoint_id} image_fallback_text model={model!r}")
     if messageinfo_enabled:
-        snapshot_id = persist_details_snapshot(ip, message, cisco_settings, message_id=message_id)
+        snapshot_id = persist_details_snapshot(ip, message, cisco_settings, message_id=message_id, model=model)
         payloads = [
             (
                 "text_details",
@@ -1381,6 +1390,12 @@ def stream_watchdog(stream_id):
             stream = active_streams.get(stream_id)
             if stream is None:
                 break
+            # Reset last_seen when transitioning out of the pre-audio grace
+            # period so the idle timeout starts fresh instead of counting
+            # from the stream creation time (which would cause an immediate
+            # kill since last_seen was never updated during pre-audio silence).
+            if not stream.get("received_audio") and stream["last_seen"] <= stream.get("pre_audio_until", 0):
+                stream["last_seen"] = time.time()
             if time.time() - stream["last_seen"] <= STREAM_IDLE_TIMEOUT:
                 sleep_for = WATCHDOG_INTERVAL
             else:
@@ -1435,9 +1450,27 @@ def multicast_mixer_loop(session_id):
                     phone_multicast_session.pop(ip, None)
                 debug_log(f"multicast_mixer stop session={session_id} phones={sorted(stop_phones)}")
                 if stop_phones:
+                    stopped_session_id = session_id
+                    def _safe_stop_multicast(ips, orig_session_id):
+                        # Re-check each phone before sending Stop to avoid
+                        # racing with a newer session that already told the
+                        # phone to listen on a new multicast address.
+                        with multicast_sessions_lock:
+                            safe_ips = [
+                                ip for ip in ips
+                                if phone_multicast_session.get(ip) is None
+                            ]
+                        if safe_ips:
+                            send_parallel_and_wait(safe_ips, xml_stop_multicast())
+                        skipped = set(ips) - set(safe_ips)
+                        if skipped:
+                            debug_log(
+                                f"multicast_mixer stop skipped reassigned phones "
+                                f"session={orig_session_id} skipped={sorted(skipped)}"
+                            )
                     threading.Thread(
-                        target=send_parallel_and_wait,
-                        args=(stop_phones, xml_stop_multicast()),
+                        target=_safe_stop_multicast,
+                        args=(stop_phones, stopped_session_id),
                         daemon=True,
                     ).start()
                 return
@@ -1621,7 +1654,13 @@ def unicast_mixer_loop(phone_ip):
             if not sources and not has_remaining:
                 unicast_sessions.pop(phone_ip, None)
                 stop_xml = xml_stop_unicast()
-                threading.Thread(target=send_phone_request, args=(phone_ip, stop_xml), daemon=True).start()
+                def _safe_stop_unicast(ip, xml):
+                    with unicast_sessions_lock:
+                        if unicast_sessions.get(ip) is not None:
+                            debug_log(f"unicast_mixer stop skipped reassigned phone={ip}")
+                            return
+                    send_phone_request(ip, xml)
+                threading.Thread(target=_safe_stop_unicast, args=(phone_ip, stop_xml), daemon=True).start()
                 debug_log(f"unicast_mixer stop phone={phone_ip}")
                 return
             frames = []

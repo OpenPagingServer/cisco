@@ -31,8 +31,7 @@ def handle_dispatch(action, stream_id, group_id, targets, metadata=None):
             normalized_targets.append(token)
     if not normalized_targets:
         page_debug(f"handle_dispatch_no_targets stream={stream_id}")
-        message_send.send_ready_signal("cisco", stream_id)
-        return
+        raise RuntimeError(f"no targets for stream={stream_id}")
     message_send.debug_log(f"livepage handle_dispatch action={action} stream={stream_id} group={group_id} targets={normalized_targets}")
     target_info = message_send.parse_targets(normalized_targets)
     spa_multicast_targets = message_send.fetch_spa_multicast_targets(target_info)
@@ -65,9 +64,8 @@ def handle_dispatch(action, stream_id, group_id, targets, metadata=None):
     if not audio_ips and not unicast_endpoints and not spa_multicast_targets:
         message_send.debug_log("livepage no_audio_ips")
         page_debug(f"handle_dispatch_no_audio stream={stream_id}")
-        message_send.send_ready_signal("cisco", stream_id)
         message_send.clear_auth_credentials(message_key)
-        return
+        raise RuntimeError(f"no available audio endpoints for stream={stream_id}")
     stream, new_ips, new_unicast_ips = message_send.ensure_stream(
         stream_id,
         audio_ips,
@@ -91,8 +89,7 @@ def handle_dispatch(action, stream_id, group_id, targets, metadata=None):
         message_send.debug_log(f"livepage no active Cisco phones after multicast start failures stream={stream_id}")
         page_debug(f"handle_dispatch_no_active_phones stream={stream_id}")
         message_send.stop_stream(stream_id)
-        message_send.send_ready_signal("cisco", stream_id)
-        return
+        raise RuntimeError(f"no active phones responded for stream={stream_id}")
     for endpoint in unicast_endpoints:
         ip = endpoint.get("ipv4")
         if not ip or ip not in new_unicast_ips:

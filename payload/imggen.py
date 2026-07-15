@@ -415,9 +415,18 @@ def choose_best_layout(work_w, work_h, pad, gap, text, font_path, start_size, sy
     layout_h = calc_layout("H")
     layout_v = calc_layout("V")
 
-    if layout_h["size"] > layout_v["size"]:
+    h_size = layout_h["size"] or 0
+    v_size = layout_v["size"] or 0
+
+    # Prefer H for wide images unless V produces a meaningfully larger font.
+    if work_w > work_h * 2:
+        if v_size > h_size * 1.15:
+            return layout_v
         return layout_h
-    if layout_v["size"] > layout_h["size"]:
+
+    if h_size > v_size:
+        return layout_h
+    if v_size > h_size:
         return layout_v
 
     area_h = layout_h["sw"] * layout_h["sh"]
@@ -435,6 +444,7 @@ def render_thumbnail(
     symbol_name: Optional[str],
     symbol_resolution: Optional[str],
     safe_bottom: int,
+    font_scale: int = 100,
 ) -> Image.Image:
     scale = 4
     work_w = width * scale
@@ -471,6 +481,18 @@ def render_thumbnail(
     tw, th = layout["tw"], layout["th"]
     metrics = layout["metrics"]
 
+    # Apply font_scale: reduce font size and re-measure text.
+    if font_scale < 100 and text and layout["size"] > 8:
+        scaled_size = max(8, int(layout["size"] * font_scale / 100))
+        if scaled_size < layout["size"]:
+            font = ImageFont.truetype(font_path, size=scaled_size)
+            spacing = max(4, scaled_size // 6)
+            avail_w = work_w - 2 * pad
+            if sym_img and direction == "H":
+                avail_w = max(1, work_w - 2 * pad - sw - gap)
+            lines = wrap_text(draw, text, font, avail_w, allow_word_breaks=False)
+            tw, th, metrics = measure_text_block(draw, lines, font, spacing)
+
     if not sym_img and not text:
         return image.resize((width, height), RESAMPLE).convert("RGB")
 
@@ -503,7 +525,10 @@ def render_thumbnail(
             curr_y = start_y + (total_h - th) // 2
 
             for line, (w, h, left, top) in zip(lines, metrics):
-                line_x = text_x_base + (tw - w) // 2
+                if len(lines) > 1:
+                    line_x = text_x_base
+                else:
+                    line_x = text_x_base + (tw - w) // 2
                 if line:
                     draw.text((line_x - left, curr_y - top), line, fill=fg_rgb, font=font)
                 curr_y += h + spacing
@@ -566,6 +591,7 @@ def cache_key_for_request(
     safe_bottom: int,
     font_path: Optional[str],
     symbol_path: Optional[Path],
+    font_scale: int = 100,
 ) -> tuple:
     font_info = file_info(font_path)
     symbol_info = file_info(str(symbol_path)) if symbol_path else ("", 0, 0)
@@ -585,6 +611,7 @@ def cache_key_for_request(
         safe_bottom,
         font_info,
         symbol_info,
+        font_scale,
     )
 
 def get_or_render(key: tuple, renderer):
@@ -650,12 +677,14 @@ def thumb():
         safe_bottom_param = request.args.get("safebottom") or request.args.get("safe_bottom")
         if safe_bottom_param is not None and safe_bottom_param != "":
             safe_bottom = int(safe_bottom_param)
-        elif width == 600 and height == 280:
-            safe_bottom = 30
         else:
             safe_bottom = 0
         if safe_bottom < 0 or safe_bottom >= height:
             raise ValueError("Safe bottom must be at least 0 and less than the image height.")
+        fontscale_param = request.args.get("fontscale")
+        font_scale = int(fontscale_param) if fontscale_param is not None and fontscale_param != "" else 100
+        if font_scale < 50 or font_scale > 100:
+            raise ValueError("Font scale must be between 50 and 100.")
 
         font_path = resolve_font_path(font_query)
         if not font_path:
@@ -690,6 +719,7 @@ def thumb():
             safe_bottom,
             font_path,
             symbol_path,
+            font_scale,
         )
 
         def renderer():
@@ -704,6 +734,7 @@ def thumb():
                 symbol_name,
                 symbol_resolution,
                 safe_bottom,
+                font_scale,
             )
             return save_png_bytes(image, mono, dpi, bit_depth)
 
