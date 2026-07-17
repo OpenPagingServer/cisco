@@ -1977,18 +1977,40 @@ def handle_api(command_string):
 def receive_audio(chunk, stream_id):
     with streams_lock:
         stream = active_streams.get(stream_id)
-        if stream is None:
-            if stream_id not in missing_streams_logged:
-                missing_streams_logged.add(stream_id)
-                debug_log(f"receive_audio missing_stream stream={stream_id} bytes={len(chunk)}")
-            return
+    if not stream:
+        if stream_id not in missing_streams_logged:
+            missing_streams_logged.add(stream_id)
+            debug_log(f"receive_audio unknown stream={stream_id}")
+        return
+
+    is_new_recorded_stream = False
+    with streams_lock:
+        if stream and not stream.get("silence_padded") and stream.get("source_kind") != LIVE_PAGE_SOURCE_KIND:
+            stream["silence_padded"] = True
+            is_new_recorded_stream = True
+
+    if is_new_recorded_stream:
+        silence_frames_needed = int(3.0 / SILENCE_INTERVAL)
+        debug_log(f"receive_audio injecting silence padding: frames={silence_frames_needed} stream={stream_id}")
+        
+        for _ in range(silence_frames_needed):
+            send_stream_frame(stream_id, SILENCE_FRAME, mark_audio=True)
+
+    if "buffer" not in stream:
+        stream["buffer"] = bytearray()
+    stream["buffer"].extend(chunk)
+
     offset = 0
-    while offset < len(chunk):
-        frame = chunk[offset:offset + FRAME_SIZE]
+    buffer_len = len(stream["buffer"])
+    while offset + FRAME_SIZE <= buffer_len:
+        frame = bytes(stream["buffer"][offset : offset + FRAME_SIZE])
         if len(frame) < FRAME_SIZE:
             frame = frame.ljust(FRAME_SIZE, b"\xff")
         send_stream_frame(stream_id, frame, mark_audio=True)
         offset += FRAME_SIZE
+
+    del stream["buffer"][:offset]
+
     with streams_lock:
         if stream_id in active_streams:
             seq = active_streams[stream_id]["seq"]
